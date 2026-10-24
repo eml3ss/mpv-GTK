@@ -17,10 +17,12 @@ TARGET := build/mpv-gtk
 CONFIG := build/mpv.conf
 INPUT_CONFIG := build/input.conf
 LOCALE_RESOURCE := build/locales/en.ini
-COMMON_SOURCES := src/config.c src/preferences.c src/transport.c src/i18n.c src/input.c src/key_commands.c src/keybindings.c src/keys_page.c src/about.c src/startup_trace.c src/gl_api.c src/chapters.c src/chapter_marks.c src/track_notice.c
+TRIM_RESOURCE := build/scripts/trim-mode.lua
+TRIM_CONFIG := build/script-opts/trim-mode.conf
+COMMON_SOURCES := src/config.c src/preferences.c src/transport.c src/i18n.c src/input.c src/key_commands.c src/keybindings.c src/keys_page.c src/about.c src/startup_trace.c src/gl_api.c src/chapters.c src/chapter_marks.c src/track_notice.c src/trim.c
 COMMON_OBJECTS := build/mpv-gtk-resources.o
 ICON_RESOURCE_FILES := $(wildcard data/icons/scalable/actions/*.svg data/icons/scalable/apps/*.svg) data/icons/LICENSE.GPL3 data/icons/NOTICE.txt data/icons/SOURCES.tsv
-HEADERS := src/timeline.h src/config.h src/preferences.h src/controls.h src/transport.h src/i18n.h src/input.h src/key_commands.h src/keybindings.h src/keys_page.h src/about.h src/startup_trace.h src/gl_api.h src/chapters.h src/chapter_marks.h src/track_notice.h
+HEADERS := src/timeline.h src/config.h src/preferences.h src/controls.h src/transport.h src/i18n.h src/input.h src/key_commands.h src/keybindings.h src/keys_page.h src/about.h src/startup_trace.h src/gl_api.h src/chapters.h src/chapter_marks.h src/track_notice.h src/trim.h
 STOCK_LIB := build/libmpv.so.2
 STOCK_ENGINE := build/mpv-engine
 STOCK_DATA := build/stock-mpv.json build/stock-mpv-version.txt
@@ -55,9 +57,19 @@ GL_API_TEST := build/test-gl-api
 GL_STARTUP_TEST := build/test-gl-startup
 DESKTOP := build/io.github.emless.mpvgtk.desktop
 
-.PHONY: all clean test install uninstall FORCE
+.PHONY: all clean test test-trim install uninstall FORCE
 
-all: $(TARGET) $(CONFIG) $(INPUT_CONFIG) $(LOCALE_RESOURCE) $(STOCK_LIB) $(STOCK_ENGINE) $(STOCK_DATA)
+all: $(TARGET) $(CONFIG) $(INPUT_CONFIG) $(LOCALE_RESOURCE) $(TRIM_RESOURCE) $(TRIM_CONFIG) $(STOCK_LIB) $(STOCK_ENGINE) $(STOCK_DATA)
+
+$(TARGET): | $(TRIM_RESOURCE) $(TRIM_CONFIG)
+
+$(TRIM_RESOURCE): data/scripts/trim-mode.lua data/scripts/LICENSE.LGPL data/scripts/NOTICE.txt | build
+	install -Dm644 "$<" "$@"
+	install -Dm644 data/scripts/LICENSE.LGPL build/scripts/LICENSE.LGPL
+	install -Dm644 data/scripts/NOTICE.txt build/scripts/NOTICE.txt
+
+$(TRIM_CONFIG): data/script-opts/trim-mode.conf | build
+	@if [ ! -e "$@" ] && [ ! -L "$@" ]; then install -Dm600 "$<" "$@"; fi
 
 $(TARGET) $(I18N_TEST) $(KEY_COMMANDS_TEST) $(KEYS_INTEGRATION_TEST) $(DECODER_TEST) $(PLAYBACK_TEST) $(AUTOPLAYLIST_TEST) $(CURSOR_TIMEOUT_TEST) $(LOCALE_TEST) $(RENDER_TEST) $(PREFERENCES_TEST) $(PREFERENCES_UI_TEST) $(SCRUB_TEST) $(LAZY_RESOURCES_TEST): | $(LOCALE_RESOURCE)
 
@@ -174,6 +186,13 @@ $(DESKTOP): data/io.github.emless.mpvgtk.desktop.in FORCE | build
 		desktop-file-validate "$@"; \
 	fi
 
+test-trim: all
+	@MPV_GTK_BINARY="$(abspath $(TARGET))" python3 tests/trim.py; \
+	status=$$?; \
+	if [ "$$status" -eq 77 ]; then \
+		printf '%s\n' 'Trim Mode integration check skipped (no usable display or FFmpeg).'; \
+	elif [ "$$status" -ne 0 ]; then exit "$$status"; fi
+
 test: $(TARGET) $(CONFIG) $(INPUT_CONFIG) $(TIMELINE_TEST) $(CONFIG_TEST) $(CONTROLS_TEST) $(CURSOR_TIMEOUT_TEST) $(LOCALE_TEST) $(RENDER_TEST) $(PREFERENCES_TEST) $(PREFERENCES_UI_TEST) $(SCRUB_TEST) $(I18N_TEST) $(DECODER_TEST) $(PLAYBACK_TEST) $(AUTOPLAYLIST_TEST) $(INPUT_TEST) $(KEY_COMMANDS_TEST) $(KEYBINDINGS_TEST) $(KEYS_INTEGRATION_TEST) $(KEYS_PAGE_UI_TEST) $(CHAPTERS_TEST) $(CHAPTERS_INTEGRATION_TEST) $(CHAPTER_MARKS_TEST) $(LAZY_RESOURCES_TEST) $(STARTUP_TEST) $(GL_API_TEST) $(GL_STARTUP_TEST) $(EMBEDDED_ENGINE_TEST) $(STOCK_LIB) $(STOCK_ENGINE) $(STOCK_DATA) $(WATCH_LATER_TEST)
 	./$(TIMELINE_TEST)
 	./$(CONFIG_TEST)
@@ -244,6 +263,12 @@ install: $(TARGET) $(CONFIG) $(INPUT_CONFIG) $(DESKTOP) $(LOCALE_RESOURCE) $(STO
 	@for license in $(STOCK_LICENSES); do install -Dm644 "$$license" "$(APPDIR)/stock-mpv-licenses/$${license##*/}"; done
 	rm -f "$(APPDIR)/libmpv-gtk-vulkan.so.2" "$(APPDIR)/libmpv-gtk-presenter.so"
 	install -Dm644 "$(LOCALE_RESOURCE)" "$(APPDIR)/locales/en.ini"
+	install -Dm644 "$(TRIM_RESOURCE)" "$(APPDIR)/scripts/trim-mode.lua"
+	install -Dm644 "data/scripts/LICENSE.LGPL" "$(APPDIR)/scripts/LICENSE.LGPL"
+	install -Dm644 "data/scripts/NOTICE.txt" "$(APPDIR)/scripts/NOTICE.txt"
+	@if [ ! -e "$(APPDIR)/script-opts/trim-mode.conf" ] && [ ! -L "$(APPDIR)/script-opts/trim-mode.conf" ]; then \
+		install -Dm600 "$(TRIM_CONFIG)" "$(APPDIR)/script-opts/trim-mode.conf"; \
+	fi
 	install -Dm644 "data/icons/scalable/apps/multimedia-video-player.svg" "$(DATADIR)/icons/hicolor/scalable/apps/io.github.emless.mpvgtk.svg"
 	@for license in LICENSE.GPL3 NOTICE.txt SOURCES.tsv; do install -Dm644 "data/icons/$$license" "$(APPDIR)/icon-licenses/$$license"; done
 	@if [ ! -e "$(APPDIR)/mpv.conf" ] && [ ! -L "$(APPDIR)/mpv.conf" ]; then \
@@ -273,6 +298,7 @@ install: $(TARGET) $(CONFIG) $(INPUT_CONFIG) $(DESKTOP) $(LOCALE_RESOURCE) $(STO
 	fi
 
 uninstall:
+	rm -f "$(APPDIR)/scripts/trim-mode.lua" "$(APPDIR)/scripts/LICENSE.LGPL" "$(APPDIR)/scripts/NOTICE.txt"
 	rm -f "$(APPDIR)/mpv-gtk" "$(APPDIR)/libmpv.so.2" "$(APPDIR)/mpv-engine" "$(APPDIR)/stock-mpv.json" "$(APPDIR)/stock-mpv-version.txt" "$(APPDIR)/locales/en.ini" "$(BINDIR)/mpv-gtk" "$(DATADIR)/applications/io.github.emless.mpvgtk.desktop"
 	rm -f "$(APPDIR)/stock-mpv-licenses/Copyright" "$(APPDIR)/stock-mpv-licenses/LICENSE.GPL" "$(APPDIR)/stock-mpv-licenses/LICENSE.LGPL"
 	rm -f "$(DATADIR)/icons/hicolor/scalable/apps/io.github.emless.mpvgtk.svg" "$(APPDIR)/icon-licenses/LICENSE.GPL3" "$(APPDIR)/icon-licenses/NOTICE.txt" "$(APPDIR)/icon-licenses/SOURCES.tsv"
@@ -284,6 +310,7 @@ uninstall:
 	fi
 
 clean:
+	rm -f "$(TRIM_RESOURCE)" build/scripts/LICENSE.LGPL build/scripts/NOTICE.txt
 	rm -f "build/mpv-gtk-resources.c" $(COMMON_OBJECTS)
 	rm -f "$(WATCH_LATER_TEST)"
 	rm -f "$(AUTOPLAYLIST_TEST)"

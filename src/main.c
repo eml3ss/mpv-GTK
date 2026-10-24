@@ -32,9 +32,10 @@
 #include "chapters.h"
 #include "chapter_marks.h"
 #include "track_notice.h"
+#include "trim.h"
 
 #define APP_ID "io.github.emless.mpvgtk"
-#define APP_VERSION "0.15.3"
+#define APP_VERSION "0.16.0"
 #define APP_ICON_NAME APP_ID
 #define HWDEC_REFRESH_ID UINT64_C(10001)
 #define HWDEC_SET_ID UINT64_C(10002)
@@ -84,6 +85,7 @@ static const KeyBindingDefault app_key_defaults[] = {
     {"Ctrl+l", "script-message mpv-gtk open-url", "Открыть ссылку"},
     {"Ctrl+q", "quit", "Закрыть проигрыватель"},
     {"Ctrl+p", "script-message mpv-gtk queue", "Показать / скрыть очередь"},
+    {"Ctrl+t", "script-message mpv-gtk trim", "Режим обрезки"},
     {"Ctrl+,", "script-message mpv-gtk settings", "Настройки"},
     {"TAB", "script-message mpv-gtk focus-next", "Следующий элемент интерфейса"},
     {"Shift+TAB", "script-message mpv-gtk focus-previous", "Предыдущий элемент интерфейса"},
@@ -171,6 +173,7 @@ typedef struct {
     const char *active_vo, *gl_api, *pending_gpu_api;
     GtkWidget *header, *controls, *empty, *error_bar, *error_label;
     GtkWidget *title, *time_label, *play_button, *play_icon, *mute_button, *root;
+    TrimMode *trim;
     GtkWidget *previous_button, *next_button, *chapter_button;
     GtkWidget *seek, *seek_overlay, *volume, *playlist, *sidebar, *stage, *video_overlay;
     GtkWidget *info_overlay;
@@ -755,6 +758,10 @@ static char *format_time(double seconds)
 
 static void update_time(Player *p, double position)
 {
+    if (trim_mode_active(p->trim)) {
+        trim_mode_position(p->trim, position, p->timeline.paused);
+        return;
+    }
     int second = (int)fmax(0, position);
     if (second == p->last_time_second)
         return;
@@ -1393,6 +1400,11 @@ static void handle_event(Player *p, mpv_event *event)
     if (p->quit_requested && event->event_id != MPV_EVENT_HOOK &&
         event->event_id != MPV_EVENT_END_FILE && event->event_id != MPV_EVENT_SHUTDOWN)
         return;
+    gboolean trimming = trim_mode_active(p->trim);
+    if (trim_mode_handle_event(p->trim, event)) {
+        if (trimming != trim_mode_active(p->trim)) p->last_time_second = -1;
+        return;
+    }
     switch (event->event_id) {
     case MPV_EVENT_HOOK: {
         mpv_event_hook *hook = event->data;
@@ -2263,6 +2275,7 @@ static void update_controls_visibility(Player *p, gint64 now)
         (p->chapter_button && gtk_menu_button_get_active(GTK_MENU_BUTTON(p->chapter_button))) ||
         (p->app_menu_button && gtk_menu_button_get_active(GTK_MENU_BUTTON(p->app_menu_button)));
     gboolean hold = p->pointer_bottom || p->dragging || p->controls_pressed || keyboard_focus || menu_open ||
+                    trim_mode_holding(p->trim) ||
                     gtk_revealer_get_reveal_child(GTK_REVEALER(p->sidebar)) ||
                     p->chooser || p->url_dialog || p->preferences || p->info_window;
     gboolean visible = controls_update(&p->controls_state, hold, now);
@@ -2273,7 +2286,7 @@ static void update_controls_visibility(Player *p, gint64 now)
     }
     /* Auxiliary windows have their own cursors and must not extend the
      * video's inactivity timer. Only an active operation here holds it. */
-    gboolean cursor_hold = p->dragging || p->controls_pressed || menu_open;
+    gboolean cursor_hold = p->dragging || p->controls_pressed || menu_open || trim_mode_holding(p->trim);
     /* mpv's deadline does not depend on pointer-position queries. The cursor
      * belongs to our widgets, so hiding it never affects another window. */
     gboolean pointer_present = p->fullscreen || p->pointer_present;
@@ -2394,6 +2407,7 @@ static gboolean language_changed_idle(gpointer data)
         return G_SOURCE_REMOVE;
     translate_tree(p->root);
     translate_tree(p->header);
+    trim_mode_translate(p->trim);
     update_app_menu(p);
     if (p->url_dialog) {
         gtk_window_set_title(p->url_dialog, tr("Открыть ссылку"));
@@ -3102,6 +3116,7 @@ static void action_activated(GSimpleAction *action, GVariant *parameter, gpointe
     else if (g_str_equal(name, "next")) simple_command(p, "playlist-next");
     else if (g_str_equal(name, "settings")) show_preferences(p);
     else if (g_str_equal(name, "info")) toggle_playback_info(p);
+    else if (g_str_equal(name, "trim")) trim_mode_toggle(p->trim);
     else if (g_str_equal(name, "config")) open_config("mpv.conf", p);
     else if (g_str_equal(name, "fullscreen"))
         set_fullscreen(p, !p->fullscreen);
@@ -3144,6 +3159,7 @@ static void app_key_action(Player *p, const char *action)
     else if (g_str_equal(action, "open-url")) show_url(p);
     else if (g_str_equal(action, "settings")) show_preferences(p);
     else if (g_str_equal(action, "info")) toggle_playback_info(p);
+    else if (g_str_equal(action, "trim")) trim_mode_toggle(p->trim);
     else if (g_str_equal(action, "fullscreen"))
         set_fullscreen(p, !p->fullscreen);
     else if (g_str_equal(action, "quit")) gtk_window_close(p->window);
@@ -3323,6 +3339,7 @@ static void prepare_close(Player *p)
         return;
     p->close_prepared = TRUE;
     p->quit_requested = TRUE;
+    trim_mode_shutdown(p->trim);
     startup_trace_mark("window close requested");
     /* Hide without unrealizing: libmpv still needs this GL context to return
      * queued frames while its native quit command saves and unloads media. */
@@ -3414,7 +3431,7 @@ static void install_actions(Player *p)
 {
     const char *names[] = {"open", "url", "play", "previous", "next", "fullscreen",
                           "mute", "queue", "quit", "audio", "subtitle", "speed",
-                          "settings", "config", "info", "new-window", "about", NULL};
+                          "settings", "config", "info", "new-window", "about", "trim", NULL};
     for (int i = 0; names[i]; ++i) {
         gboolean stateful = i >= 9 && i <= 11;
         GSimpleAction *action = stateful
@@ -3777,6 +3794,27 @@ static void application_started(GApplication *application, gpointer data)
     startup_trace_mark("GTK application startup completed");
 }
 
+static void trim_seek_to(double seconds, gpointer data)
+{
+    seek_absolute(data, seconds);
+}
+
+static void trim_message(const char *message, gboolean error, gpointer data)
+{
+    Player *p = data;
+    if (p->closing || p->quit_requested) return;
+    if (error) {
+        show_error(p, message);
+        return;
+    }
+    if (!p->track_notice) {
+        p->track_notice = track_notice_new(GTK_OVERLAY(p->video_overlay));
+        g_object_add_weak_pointer(G_OBJECT(p->track_notice), (gpointer *)&p->track_notice);
+    }
+    position_track_notice(p);
+    track_notice_show(p->track_notice, tr("Обрезка"), message);
+}
+
 static void activate(GtkApplication *application, gpointer data)
 {
     Player *p = data;
@@ -4046,6 +4084,16 @@ static void activate(GtkApplication *application, gpointer data)
     g_signal_connect(chapter_context, "released", G_CALLBACK(chapter_secondary_click), p);
     gtk_widget_add_controller(p->chapter_button, GTK_EVENT_CONTROLLER(chapter_context));
     gtk_box_append(GTK_BOX(transport), p->chapter_button);
+    TrimHost trim_host = {
+        .mpv = p->mpv, .window = p->window,
+        .controls = GTK_BOX(p->controls), .transport = GTK_BOX(transport),
+        .seek = p->seek_overlay, .playback = playback, .audio_time = audio_time,
+        .status = p->status_label, .time = GTK_LABEL(p->time_label),
+        .video = GTK_OVERLAY(p->video_overlay), .config_path = config_path(&p->config),
+        .seek_to = trim_seek_to, .message = trim_message, .data = p
+    };
+    p->trim = trim_mode_new(&trim_host);
+    gtk_box_append(GTK_BOX(transport), trim_mode_button(p->trim));
     GtkWidget *info = icon_button("dialog-information-symbolic",
         "Информация · I\nЛКМ — на видео, ПКМ — отдельное окно", "app.info");
     GtkGesture *info_context = gtk_gesture_click_new();
@@ -4106,6 +4154,10 @@ static void activate(GtkApplication *application, gpointer data)
         ".compact-menu > button:hover { background: alpha(@window_fg_color,.08); }"
         ".active-track > button { color: @accent_color; background: alpha(@accent_bg_color,.12); }"
         ".timecode { font-variant-numeric: tabular-nums; font-family: 'Adwaita Sans', sans-serif; }"
+        ".controls button.trim-active { color: @accent_color; background: alpha(@accent_bg_color,.14); }"
+        ".trim-time { min-height: 26px; padding: 2px 8px; border-radius: 7px; }"
+        ".trim-controls { padding: 2px 0; }"
+        ".trim-timeline { color: @accent_bg_color; }"
         ".queue { background: @view_bg_color; color: @view_fg_color;"
         "border-left: 1px solid alpha(@window_fg_color,.08); }"
         ".queue list { background: transparent; }"
@@ -4330,6 +4382,7 @@ int main(int argc, char **argv)
     for (guint i = 0; i < G_N_ELEMENTS(p.playlist_values); ++i)
         g_free(p.playlist_values[i]);
     clear_playback_values(&p.playback);
+    trim_mode_free(p.trim);
     g_object_unref(p.application);
     g_ptr_array_unref(p.pending);
     g_queue_clear_full(&p.pending_commands, (GDestroyNotify)g_strfreev);

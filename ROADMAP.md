@@ -88,3 +88,13 @@ implementation task. Queue restoration remains a separate task under item 2.
 - [ ] Remember the window size.
 - [ ] Remember the last opened directory.
 - [ ] Restore queue-panel visibility and other selected display preferences.
+
+## 17. Trim Mode
+
+- [x] Switch between playback and native GTK trim controls with the scissors button or Ctrl+T.
+- [x] Show the selected range, keyframe markers, millisecond time, and current frame number.
+- [x] Edit start/end times and set either boundary from the playback position.
+- [x] Navigate previous/next keyframes and preserve mode-specific shortcuts.
+- [x] Export a separate copy or replace the original using the existing lossless backend.
+- [x] Preserve export verification, backup/rollback, result opening, and playback state.
+- [x] Show native GTK export progress; load the backend and trim controls on demand.

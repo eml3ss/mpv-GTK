@@ -7,6 +7,7 @@ independently of the video's frame rate.
 - Open local files and URLs, or drag files into the player.
 - Manage playlists, chapters, audio tracks, subtitles, and playback speed.
 - Configure playback and mpv keybindings from the settings window.
+- Switch to [Trim Mode](docs/trim-mode.md) for lossless video cuts.
 - View playback statistics and resume playback with mpv's watch-later support.
 - English and Russian interface, with colors from your GTK theme.
 
@@ -16,6 +17,7 @@ See the [roadmap](ROADMAP.md) for planned features and implementation progress.
 
 Requires Linux with Wayland, GTK 4.22+, mpv/libmpv, libepoxy, a C11 compiler,
 Make, pkg-config, Python 3, and `glib-compile-resources`.
+Trim Mode additionally requires FFmpeg (`ffmpeg` and `ffprobe`).
 
 ```sh
 git clone https://github.com/eml3ss/mpv-GTK.git
