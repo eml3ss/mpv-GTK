@@ -7,6 +7,10 @@
   English. Preserve the player's localization and its test expectations.
 - Keep README.md short: purpose, main features, build/install instructions,
   configuration paths, and license. Put detailed technical information in docs/.
+- Maintain ROADMAP.md as features are implemented or their scope changes.
+  Update completed tasks in the same commit as the implementation. Distinguish
+  existing mpv commands from completed interface features, preserve feature IDs,
+  and keep tentative items explicitly tentative until the user decides otherwise.
 
 ## Git workflow
 

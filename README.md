@@ -10,6 +10,8 @@ independently of the video's frame rate.
 - View playback statistics and resume playback with mpv's watch-later support.
 - English and Russian interface, with colors from your GTK theme.
 
+See the [roadmap](ROADMAP.md) for planned features and implementation progress.
+
 ## Build and run
 
 Requires Linux with Wayland, GTK 4.22+, mpv/libmpv, libepoxy, a C11 compiler,
