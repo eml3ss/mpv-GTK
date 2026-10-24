@@ -18,10 +18,10 @@ CONFIG := build/mpv.conf
 INPUT_CONFIG := build/input.conf
 LOCALE_RESOURCE := build/locales/en.ini
 TRIM_CONFIG := build/script-opts/trim-mode.conf
-COMMON_SOURCES := src/config.c src/preferences.c src/transport.c src/i18n.c src/input.c src/key_commands.c src/keybindings.c src/keys_page.c src/about.c src/startup_trace.c src/gl_api.c src/chapters.c src/chapter_marks.c src/track_notice.c src/trim.c src/trim_backend.c src/trim_export.c
+COMMON_SOURCES := src/config.c src/preferences.c src/transport.c src/i18n.c src/input.c src/key_commands.c src/keybindings.c src/keys_page.c src/about.c src/startup_trace.c src/gl_api.c src/chapters.c src/chapter_marks.c src/track_notice.c src/trim.c src/trim_backend.c src/trim_export.c src/seek_preview.c
 COMMON_OBJECTS := build/mpv-gtk-resources.o
 ICON_RESOURCE_FILES := $(wildcard data/icons/scalable/actions/*.svg data/icons/scalable/apps/*.svg) data/icons/LICENSE.GPL3 data/icons/NOTICE.txt data/icons/SOURCES.tsv
-HEADERS := src/timeline.h src/config.h src/preferences.h src/controls.h src/transport.h src/i18n.h src/input.h src/key_commands.h src/keybindings.h src/keys_page.h src/about.h src/startup_trace.h src/gl_api.h src/chapters.h src/chapter_marks.h src/track_notice.h src/trim.h src/trim_backend.h src/trim_export.h
+HEADERS := src/timeline.h src/config.h src/preferences.h src/controls.h src/transport.h src/i18n.h src/input.h src/key_commands.h src/keybindings.h src/keys_page.h src/about.h src/startup_trace.h src/gl_api.h src/chapters.h src/chapter_marks.h src/track_notice.h src/trim.h src/trim_backend.h src/trim_export.h src/seek_preview.h
 STOCK_LIB := build/libmpv.so.2
 STOCK_ENGINE := build/mpv-engine
 STOCK_DATA := build/stock-mpv.json build/stock-mpv-version.txt
@@ -55,9 +55,10 @@ STARTUP_TEST := build/test-startup
 GL_API_TEST := build/test-gl-api
 GL_STARTUP_TEST := build/test-gl-startup
 TRIM_NATIVE_TEST := build/test-trim-native
+SEEK_PREVIEW_TEST := build/test-seek-preview
 DESKTOP := build/io.github.emless.mpvgtk.desktop
 
-.PHONY: all clean test test-trim test-trim-native install uninstall FORCE
+.PHONY: all clean test test-trim test-trim-native test-seek-preview install uninstall FORCE
 
 all: $(TARGET) $(CONFIG) $(INPUT_CONFIG) $(LOCALE_RESOURCE) $(TRIM_CONFIG) $(STOCK_LIB) $(STOCK_ENGINE) $(STOCK_DATA)
 
@@ -189,6 +190,14 @@ test-trim-native: $(TRIM_NATIVE_TEST)
 	if [ "$$status" -eq 77 ]; then printf '%s\n' 'Native Trim Mode check skipped (FFmpeg unavailable).'; \
 	elif [ "$$status" -ne 0 ]; then exit "$$status"; fi
 
+$(SEEK_PREVIEW_TEST): tests/seek_preview.c src/seek_preview.c src/seek_preview.h src/i18n.c src/i18n.h $(STOCK_LIB) | build $(LOCALE_RESOURCE)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -o "$@" tests/seek_preview.c src/seek_preview.c src/i18n.c $(LDLIBS)
+
+test-seek-preview: $(SEEK_PREVIEW_TEST)
+	@./$(SEEK_PREVIEW_TEST); status=$$?; \
+	if [ "$$status" -eq 77 ]; then printf '%s\n' 'Timeline preview check skipped (no usable Wayland display or FFmpeg).'; \
+	elif [ "$$status" -ne 0 ]; then exit "$$status"; fi
+
 test-trim: all test-trim-native
 	@MPV_GTK_BINARY="$(abspath $(TARGET))" python3 tests/trim.py; \
 	status=$$?; \
@@ -314,6 +323,7 @@ uninstall:
 	fi
 
 clean:
+	rm -f "$(SEEK_PREVIEW_TEST)"
 	rm -f "$(TRIM_NATIVE_TEST)"
 	rm -f build/trim-licenses/LICENSE.LGPL build/trim-licenses/NOTICE.txt build/scripts/trim-mode.lua build/scripts/LICENSE.LGPL build/scripts/NOTICE.txt
 	rm -f "build/mpv-gtk-resources.c" $(COMMON_OBJECTS)

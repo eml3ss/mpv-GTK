@@ -15,6 +15,7 @@ static char *interface_path;
 static double cursor_hide_delay = 3.0;
 static gboolean allow_replace = TRUE;
 static gboolean add_to_queue;
+static gboolean timeline_previews = TRUE;
 static GHashTable *translations;
 static gboolean translations_attempted;
 
@@ -137,6 +138,7 @@ gboolean i18n_init(const char *mpv_config_path, GError **error)
     cursor_hide_delay = 3.0;
     allow_replace = TRUE;
     add_to_queue = FALSE;
+    timeline_previews = TRUE;
     g_clear_pointer(&interface_path, g_free);
     if (!mpv_config_path || !*mpv_config_path) {
         g_set_error_literal(error, G_FILE_ERROR, G_FILE_ERROR_INVAL,
@@ -155,6 +157,7 @@ gboolean i18n_init(const char *mpv_config_path, GError **error)
         cursor_hide_delay = normalized_cursor_hide_delay(delay);
     allow_replace = load_boolean(file, "allow-replace", TRUE);
     add_to_queue = load_boolean(file, "add-to-queue", FALSE);
+    timeline_previews = load_boolean(file, "timeline-previews", TRUE);
     return TRUE;
 }
 
@@ -243,7 +246,7 @@ static gboolean save_boolean(const char *key, gboolean enabled, gboolean *cached
 {
     if (!interface_path) {
         g_set_error_literal(error, G_FILE_ERROR, G_FILE_ERROR_INVAL,
-                            "Initialize UI preferences before saving load policy");
+                            "Initialize UI preferences before saving interface options");
         return FALSE;
     }
     enabled = !!enabled;
@@ -261,5 +264,15 @@ gboolean i18n_save_allow_replace(gboolean enabled, GError **error)
 gboolean i18n_save_add_to_queue(gboolean enabled, GError **error)
 {
     return save_boolean("add-to-queue", enabled, &add_to_queue, error);
+}
+
+gboolean i18n_timeline_previews(void)
+{
+    return timeline_previews;
+}
+
+gboolean i18n_save_timeline_previews(gboolean enabled, GError **error)
+{
+    return save_boolean("timeline-previews", enabled, &timeline_previews, error);
 }
 

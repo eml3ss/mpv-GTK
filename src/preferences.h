@@ -34,6 +34,7 @@ typedef struct {
     gboolean loop;
     gboolean allow_replace;
     gboolean add_to_queue;
+    gboolean timeline_previews;
     double audio_delay;
     double sub_delay;
     double sub_scale;

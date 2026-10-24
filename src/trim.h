@@ -3,6 +3,7 @@
 
 #include <gtk/gtk.h>
 #include <mpv/client.h>
+#include "seek_preview.h"
 
 typedef struct TrimMode TrimMode;
 typedef struct {
@@ -16,6 +17,7 @@ typedef struct {
     void (*seek_to)(double seconds, gpointer data);
     void (*message)(const char *text, gboolean error, gpointer data);
     gpointer data;
+    SeekPreview *previews;
 } TrimHost;
 
 TrimMode *trim_mode_new(const TrimHost *host);

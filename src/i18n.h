@@ -30,4 +30,9 @@ gboolean i18n_add_to_queue(void);
 gboolean i18n_save_allow_replace(gboolean enabled, GError **error);
 gboolean i18n_save_add_to_queue(gboolean enabled, GError **error);
 
+/* Timeline hover previews default to enabled. Successful saves update the
+ * cached choice; this preference never enters mpv.conf. */
+gboolean i18n_timeline_previews(void);
+gboolean i18n_save_timeline_previews(gboolean enabled, GError **error);
+
 #endif

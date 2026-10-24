@@ -33,9 +33,10 @@
 #include "chapter_marks.h"
 #include "track_notice.h"
 #include "trim.h"
+#include "seek_preview.h"
 
 #define APP_ID "io.github.emless.mpvgtk"
-#define APP_VERSION "0.17.1"
+#define APP_VERSION "0.18.0"
 #define APP_ICON_NAME APP_ID
 #define HWDEC_REFRESH_ID UINT64_C(10001)
 #define HWDEC_SET_ID UINT64_C(10002)
@@ -174,6 +175,7 @@ typedef struct {
     GtkWidget *header, *controls, *empty, *error_bar, *error_label;
     GtkWidget *title, *time_label, *play_button, *play_icon, *mute_button, *root;
     TrimMode *trim;
+    SeekPreview *seek_preview;
     GtkWidget *previous_button, *next_button, *chapter_button;
     GtkWidget *seek, *seek_overlay, *volume, *playlist, *sidebar, *stage, *video_overlay;
     GtkWidget *info_overlay;
@@ -1400,6 +1402,7 @@ static void handle_event(Player *p, mpv_event *event)
     if (p->quit_requested && event->event_id != MPV_EVENT_HOOK &&
         event->event_id != MPV_EVENT_END_FILE && event->event_id != MPV_EVENT_SHUTDOWN)
         return;
+    if (seek_preview_handle_event(p->seek_preview, event)) return;
     gboolean trimming = trim_mode_active(p->trim);
     if (trim_mode_handle_event(p->trim, event)) {
         if (trimming != trim_mode_active(p->trim)) p->last_time_second = -1;
@@ -2548,6 +2551,15 @@ static void preference_changed(const char *name, mpv_format format, const void *
     Player *p = data;
     if (p->closing)
         return;
+    if (g_str_equal(name, "timeline-previews")) {
+        g_autoptr(GError) error = NULL;
+        if (!i18n_save_timeline_previews(!!*(const int *)value, &error))
+            show_error(p, error->message);
+        p->preference_values.timeline_previews = i18n_timeline_previews();
+        seek_preview_set_enabled(p->seek_preview, p->preference_values.timeline_previews);
+        if (p->preferences) preferences_window_update(p->preferences, &p->preference_values);
+        return;
+    }
     if (g_str_equal(name, "ui-allow-replace") || g_str_equal(name, "ui-add-to-queue")) {
         gboolean allow = g_str_equal(name, "ui-allow-replace");
         gboolean enabled = !!*(const int *)value;
@@ -3339,6 +3351,7 @@ static void prepare_close(Player *p)
         return;
     p->close_prepared = TRUE;
     p->quit_requested = TRUE;
+    seek_preview_shutdown(p->seek_preview);
     trim_mode_shutdown(p->trim);
     startup_trace_mark("window close requested");
     /* Hide without unrealizing: libmpv still needs this GL context to return
@@ -3960,6 +3973,9 @@ static void activate(GtkApplication *application, gpointer data)
     gtk_widget_set_hexpand(p->seek, TRUE);
     p->seek_overlay = chapter_marks_new(GTK_RANGE(p->seek));
     gtk_box_append(GTK_BOX(p->controls), p->seek_overlay);
+    p->seek_preview = seek_preview_new(p->mpv);
+    seek_preview_set_enabled(p->seek_preview, p->preference_values.timeline_previews);
+    seek_preview_attach(p->seek_preview, p->seek, TRUE);
     g_signal_connect(p->seek, "value-changed", G_CALLBACK(seek_changed), p);
     GtkEventController *release = gtk_event_controller_legacy_new();
     gtk_event_controller_set_propagation_phase(release, GTK_PHASE_CAPTURE);
@@ -4090,7 +4106,8 @@ static void activate(GtkApplication *application, gpointer data)
         .seek = p->seek_overlay, .playback = playback, .audio_time = audio_time,
         .status = p->status_label, .time = GTK_LABEL(p->time_label),
         .video = GTK_OVERLAY(p->video_overlay), .config_path = config_path(&p->config),
-        .seek_to = trim_seek_to, .message = trim_message, .data = p
+        .seek_to = trim_seek_to, .message = trim_message, .data = p,
+        .previews = p->seek_preview
     };
     p->trim = trim_mode_new(&trim_host);
     gtk_box_append(GTK_BOX(transport), trim_mode_button(p->trim));
@@ -4289,6 +4306,7 @@ int main(int argc, char **argv)
     p.preference_values.cursor_hide_delay = i18n_cursor_hide_delay();
     p.preference_values.allow_replace = i18n_allow_replace();
     p.preference_values.add_to_queue = i18n_add_to_queue();
+    p.preference_values.timeline_previews = i18n_timeline_previews();
     /* GTK must not change the numeric locale while early demuxing runs on
      * libmpv's threads. Keep the desktop's other locale categories intact. */
     setlocale(LC_ALL, "");
@@ -4360,6 +4378,8 @@ int main(int argc, char **argv)
     continue_render_load(&p);
     /* Render context was freed by GLArea::unrealize with its context current.
      * Only now may we synchronously wait for the mpv core to terminate. */
+    seek_preview_free(p.seek_preview);
+    p.seek_preview = NULL;
     trim_mode_free(p.trim);
     p.trim = NULL;
     if (p.mpv) {

@@ -20,7 +20,7 @@ typedef struct {
     GtkLabel *hwdec_description, *hwdec_status;
     PreferenceValues values;
     GtkSwitch *keepaspect, *deinterlace, *deband, *loop;
-    GtkSwitch *allow_replace, *add_to_queue;
+    GtkSwitch *allow_replace, *add_to_queue, *timeline_previews;
     GtkDropDown *autocreate_playlist, *directory_mode;
     GPtrArray *autocreate_values, *directory_values;
     GtkLabel *autocreate_description, *directory_description;
@@ -1215,6 +1215,8 @@ static void refresh_controls(Preferences *p, const char *section)
         gtk_switch_set_active(p->allow_replace, values->allow_replace);
     if (p->add_to_queue && (!section || g_str_equal(section, "interface")))
         gtk_switch_set_active(p->add_to_queue, values->add_to_queue);
+    if (p->timeline_previews && (!section || g_str_equal(section, "interface")))
+        gtk_switch_set_active(p->timeline_previews, values->timeline_previews);
     if (!section || g_str_equal(section, "audio")) {
         refresh_audio_controls(p);
         update_number(p->audio_delay, isfinite(values->audio_delay) ? values->audio_delay : 0);
@@ -1574,6 +1576,8 @@ static void build_interface(Preferences *p)
     use_seconds_unit(p->cursor_hide_delay);
     gtk_spin_button_set_digits(p->cursor_hide_delay, 1);
     gtk_spin_button_set_snap_to_ticks(p->cursor_hide_delay, TRUE);
+    p->timeline_previews = add_switch(p, interface, "timeline-previews", tr("Превью при наведении"),
+        tr("Показывает кадр и время над полосой воспроизведения. Кадры загружаются по запросу."));
     p->allow_replace = add_switch(p, interface, "ui-allow-replace", tr("Разрешать замену файла"),
         tr("При открытии и перетаскивании разрешает заменить текущий файл. Если оба режима выключены, открытый файл сохраняется."));
     p->add_to_queue = add_switch(p, interface, "ui-add-to-queue", tr("Добавлять файлы в очередь"),

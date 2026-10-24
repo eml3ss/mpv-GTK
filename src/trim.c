@@ -440,6 +440,7 @@ static void build_controls(TrimMode *t)
     gtk_widget_set_hexpand(t->canvas, TRUE);
     gtk_drawing_area_set_content_height(GTK_DRAWING_AREA(t->canvas), 32);
     gtk_drawing_area_set_draw_func(GTK_DRAWING_AREA(t->canvas), timeline_draw, t, NULL);
+    if (t->host.previews) seek_preview_attach(t->host.previews, t->canvas, FALSE);
     g_signal_connect(t->canvas, "unmap", G_CALLBACK(timeline_unmapped), t);
     set_tooltip(t->canvas, "Диапазон обрезки и ключевые кадры");
     GtkGesture *drag = gtk_gesture_drag_new();
