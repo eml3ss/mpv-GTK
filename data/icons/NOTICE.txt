@@ -1,0 +1,17 @@
+Bundled mpv GTK interface icons
+
+These SVGs are a small selection from the Papirus icon theme, maintained by
+the Papirus Development Team and contributors:
+https://github.com/PapirusDevelopmentTeam/papirus-icon-theme
+
+Papirus is distributed under the GNU General Public License, version 3.
+The complete license text is included in LICENSE.GPL3.
+
+The SVG source files are copied unchanged from the Papirus-Dark theme's
+symbolic icons and Papirus's multimedia-video-player application icon.
+Symbolic links have been resolved into standalone SVG files. SOURCES.tsv
+records each original path within Papirus and the copied file's SHA-256.
+The resource alias io.github.emless.mpvgtk uses the same application SVG.
+
+Only these files are bundled. Standard internal GTK icons remain supplied
+by GTK's own built-in resources and retain their upstream licensing.

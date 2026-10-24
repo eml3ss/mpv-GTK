@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<gresources>
+  <gresource prefix="/io/github/emless/mpvgtk/icons">
+    <file alias="scalable/actions/audio-volume-high-symbolic.svg">icons/scalable/actions/audio-volume-high-symbolic.svg</file>
+    <file alias="scalable/actions/audio-volume-muted-symbolic.svg">icons/scalable/actions/audio-volume-muted-symbolic.svg</file>
+    <file alias="scalable/actions/dialog-information-symbolic.svg">icons/scalable/actions/dialog-information-symbolic.svg</file>
+    <file alias="scalable/actions/document-open-symbolic.svg">icons/scalable/actions/document-open-symbolic.svg</file>
+    <file alias="scalable/actions/emblem-system-symbolic.svg">icons/scalable/actions/emblem-system-symbolic.svg</file>
+    <file alias="scalable/actions/go-next-symbolic.svg">icons/scalable/actions/go-next-symbolic.svg</file>
+    <file alias="scalable/actions/go-previous-symbolic.svg">icons/scalable/actions/go-previous-symbolic.svg</file>
+    <file alias="scalable/actions/input-keyboard-symbolic.svg">icons/scalable/actions/input-keyboard-symbolic.svg</file>
+    <file alias="scalable/actions/insert-link-symbolic.svg">icons/scalable/actions/insert-link-symbolic.svg</file>
+    <file alias="scalable/actions/media-playback-start-symbolic.svg">icons/scalable/actions/media-playback-start-symbolic.svg</file>
+    <file alias="scalable/actions/media-view-subtitles-symbolic.svg">icons/scalable/actions/media-view-subtitles-symbolic.svg</file>
+    <file alias="scalable/actions/preferences-system-symbolic.svg">icons/scalable/actions/preferences-system-symbolic.svg</file>
+    <file alias="scalable/actions/video-display-symbolic.svg">icons/scalable/actions/video-display-symbolic.svg</file>
+    <file alias="scalable/actions/view-fullscreen-symbolic.svg">icons/scalable/actions/view-fullscreen-symbolic.svg</file>
+    <file alias="scalable/actions/view-list-ordered-symbolic.svg">icons/scalable/actions/view-list-ordered-symbolic.svg</file>
+    <file alias="scalable/actions/view-list-symbolic.svg">icons/scalable/actions/view-list-symbolic.svg</file>
+    <file alias="scalable/actions/view-more-symbolic.svg">icons/scalable/actions/view-more-symbolic.svg</file>
+    <file alias="scalable/actions/window-close-symbolic.svg">icons/scalable/actions/window-close-symbolic.svg</file>
+    <file alias="scalable/apps/multimedia-video-player.svg">icons/scalable/apps/multimedia-video-player.svg</file>
+    <file alias="scalable/apps/io.github.emless.mpvgtk.svg">icons/scalable/apps/multimedia-video-player.svg</file>
+  </gresource>
+  <gresource prefix="/io/github/emless/mpvgtk/licenses">
+    <file alias="icons-LICENSE.GPL3">icons/LICENSE.GPL3</file>
+    <file alias="icons-NOTICE.txt">icons/NOTICE.txt</file>
+    <file alias="icons-SOURCES.tsv">icons/SOURCES.tsv</file>
+  </gresource>
+</gresources>

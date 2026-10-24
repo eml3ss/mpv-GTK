@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=mpv GTK
+GenericName=Media Player
+GenericName[ru]=Медиаплеер
+Comment=GTK interface for mpv with independently rendered controls
+Comment[ru]=GTK-интерфейс для mpv с независимым обновлением элементов управления
+Exec="@BINDIR@/mpv-gtk" %U
+Icon=io.github.emless.mpvgtk
+Terminal=false
+Categories=AudioVideo;Player;Video;
+MimeType=video/mp4;video/x-matroska;video/webm;video/mpeg;video/quicktime;video/x-msvideo;video/ogg;audio/mpeg;audio/flac;audio/ogg;audio/x-wav;
+StartupNotify=true
