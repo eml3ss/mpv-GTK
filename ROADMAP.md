@@ -93,6 +93,8 @@ implementation task. Queue restoration remains a separate task under item 2.
 
 - [x] Switch between playback and native GTK trim controls with the scissors button or Ctrl+T.
 - [x] Show the selected range, keyframe markers, millisecond time, and current frame number.
+- [x] Animate both selection edges with the original 200 ms easing and smooth retargeting.
+- [x] Keep the standard toolbar buttons aligned in both trim layouts.
 - [x] Edit start/end times and set either boundary from the playback position.
 - [x] Navigate previous/next keyframes and preserve mode-specific shortcuts.
 - [x] Export a separate copy or replace the original using the existing lossless backend.

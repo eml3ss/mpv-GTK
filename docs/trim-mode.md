@@ -14,6 +14,8 @@ LGPL-2.1-or-later license are in [data/scripts](../data/scripts/NOTICE.txt).
 The trim timeline highlights the selected interval and marks video keyframes.
 Click or drag it to seek. The playback counter shows milliseconds and mpv's
 estimated frame number.
+Both selection edges animate over 200 ms with cubic ease-out, matching the
+original script. Repeated edits continue smoothly from the current drawing.
 
 | Action | Control or shortcut |
 | --- | --- |
@@ -33,6 +35,7 @@ User keybindings retain priority over the trim defaults. Trim shortcuts are
 inactive while a time field is being edited or playback mode is selected.
 
 In narrower windows, the boundary controls occupy their own centered row.
+The remaining toolbar controls keep their normal alignment.
 Fullscreen panel and cursor autohide remain available; editing or dragging
 holds the controls while the interaction is active.
 

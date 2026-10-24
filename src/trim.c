@@ -8,6 +8,7 @@
 #define TRIM_LOAD_ID (UINT64_C(1) << 39)
 #define TRIM_OBSERVE_BASE (UINT64_C(1) << 40)
 #define TRIM_FRAME_ID (UINT64_C(1) << 41)
+#define TRIM_SELECTION_DURATION_US INT64_C(200000)
 
 typedef enum { SCISSORS, KEY_PREVIOUS, KEY_NEXT, SET_START, SET_END,
                EXPORT_COPY, EXPORT_REPLACE } TrimGlyph;
@@ -31,6 +32,9 @@ struct TrimMode {
     guint generation, frame_generation;
     gint64 next_frame_at;
     gint64 first_ms, last_ms, duration_ms, frame;
+    gboolean selection_animated;
+    gint64 selection_started, selection_file_serial;
+    double selection_from[2], selection_to[2];
     double position, pending_seek;
     char *phase;
 };
@@ -97,10 +101,10 @@ static void glyph_draw(GtkDrawingArea *area, cairo_t *cr, int width, int height,
     cairo_set_line_cap(cr, CAIRO_LINE_CAP_ROUND);
     cairo_set_line_join(cr, CAIRO_LINE_JOIN_ROUND);
     if (glyph == SCISSORS) {
-        cairo_arc(cr, 6, 6, 3, 0, 2 * G_PI); cairo_stroke(cr);
-        cairo_arc(cr, 6, 18, 3, 0, 2 * G_PI); cairo_stroke(cr);
-        cairo_move_to(cr, 8.3, 8); cairo_line_to(cr, 21, 20);
-        cairo_move_to(cr, 8.3, 16); cairo_line_to(cr, 21, 4); cairo_stroke(cr);
+        cairo_arc(cr, 6, 7, 3, 0, 2 * G_PI); cairo_stroke(cr);
+        cairo_arc(cr, 6, 17, 3, 0, 2 * G_PI); cairo_stroke(cr);
+        cairo_move_to(cr, 8.3, 9); cairo_line_to(cr, 21, 18);
+        cairo_move_to(cr, 8.3, 15); cairo_line_to(cr, 21, 6); cairo_stroke(cr);
     } else if (glyph == KEY_PREVIOUS || glyph == KEY_NEXT) {
         if (glyph == KEY_NEXT) { cairo_translate(cr, 24, 0); cairo_scale(cr, -1, 1); }
         cairo_arc(cr, 15, 12, 4, 0, 2 * G_PI); cairo_stroke(cr);
@@ -237,6 +241,51 @@ static void rounded(cairo_t *cr, double x, double y, double width, double height
     cairo_close_path(cr);
 }
 
+static void selection_at(TrimMode *t, gint64 now, double *first, double *last)
+{
+    if (t->selection_animated) {
+        double progress = CLAMP((double)(now - t->selection_started) / TRIM_SELECTION_DURATION_US, 0, 1);
+        double remaining = 1 - progress;
+        double eased = 1 - remaining * remaining * remaining;
+        *first = t->selection_from[0] + (t->selection_to[0] - t->selection_from[0]) * eased;
+        *last = t->selection_from[1] + (t->selection_to[1] - t->selection_from[1]) * eased;
+        if (progress >= 1) t->selection_animated = FALSE;
+        return;
+    }
+    *first = t->duration_ms > 0 ? CLAMP((double)t->first_ms / t->duration_ms, 0, 1) : 0;
+    *last = t->duration_ms > 0 ? CLAMP((double)t->last_ms / t->duration_ms, 0, 1) : 1;
+}
+
+static void update_selection(TrimMode *t, gint64 first, gint64 last, gint64 duration,
+                             gint64 serial, gboolean available)
+{
+    if (!t->active || !t->canvas || !gtk_widget_get_mapped(t->canvas) || !available ||
+        available != t->available || duration != t->duration_ms || serial != t->selection_file_serial) {
+        t->selection_animated = FALSE;
+    } else if (duration > 0 && (first != t->first_ms || last != t->last_ms)) {
+        gboolean animations = TRUE;
+        g_object_get(gtk_widget_get_settings(t->canvas), "gtk-enable-animations", &animations, NULL);
+        if (animations) {
+            gint64 now = g_get_monotonic_time();
+            /* Match the original 200 ms ease-out, retargeting both edges from
+             * their current drawing when another edit arrives mid-animation. */
+            selection_at(t, now, &t->selection_from[0], &t->selection_from[1]);
+            t->selection_to[0] = CLAMP((double)first / duration, 0, 1);
+            t->selection_to[1] = CLAMP((double)last / duration, 0, 1);
+            t->selection_started = now;
+            t->selection_animated = TRUE;
+        } else t->selection_animated = FALSE;
+    }
+    t->selection_file_serial = serial;
+}
+
+static void timeline_unmapped(GtkWidget *widget, gpointer data)
+{
+    (void)widget;
+    TrimMode *t = data;
+    t->selection_animated = FALSE;
+}
+
 static void timeline_draw(GtkDrawingArea *area, cairo_t *cr, int width, int height, gpointer data)
 {
     TrimMode *t = data;
@@ -247,8 +296,10 @@ static void timeline_draw(GtkDrawingArea *area, cairo_t *cr, int width, int heig
     cairo_set_source_rgba(cr, foreground.red, foreground.green, foreground.blue, .14);
     rounded(cr, 1, y, w, h, 5); cairo_fill(cr);
     if (!t->available || t->duration_ms <= 0) return;
-    double first = 1 + w * t->first_ms / t->duration_ms;
-    double last = 1 + w * t->last_ms / t->duration_ms;
+    double first, last;
+    selection_at(t, g_get_monotonic_time(), &first, &last);
+    first = 1 + w * first;
+    last = 1 + w * last;
     gdk_cairo_set_source_rgba(cr, &accent);
     rounded(cr, first, y, MAX(0, last - first), h, 4); cairo_fill(cr);
     rounded(cr, 1, y, w, h, 5); cairo_clip(cr);
@@ -347,6 +398,9 @@ static void arrange(TrimMode *t)
         gtk_box_insert_child_after(target, t->group, small ? t->canvas : t->host.audio_time);
     }
     t->small = small;
+    /* The status label is also the toolbar's expanding spacer. When trim
+     * controls occupy their own row, retain it to anchor the right buttons. */
+    gtk_widget_set_visible(t->host.status, !t->active || small);
 }
 
 static const char *phase_label(const char *phase)
@@ -386,6 +440,7 @@ static void build_controls(TrimMode *t)
     gtk_widget_set_hexpand(t->canvas, TRUE);
     gtk_drawing_area_set_content_height(GTK_DRAWING_AREA(t->canvas), 32);
     gtk_drawing_area_set_draw_func(GTK_DRAWING_AREA(t->canvas), timeline_draw, t, NULL);
+    g_signal_connect(t->canvas, "unmap", G_CALLBACK(timeline_unmapped), t);
     set_tooltip(t->canvas, "Диапазон обрезки и ключевые кадры");
     GtkGesture *drag = gtk_gesture_drag_new();
     gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(drag), GDK_BUTTON_PRIMARY);
@@ -476,11 +531,12 @@ static void set_active(TrimMode *t, gboolean active)
     t->active = active;
     if (!active) {
         t->dragging = FALSE;
+        t->selection_animated = FALSE;
         if (t->seek_source) { g_source_remove(t->seek_source); t->seek_source = 0; }
     }
     gtk_widget_set_visible(t->host.seek, !active);
     gtk_widget_set_visible(t->host.playback, !active);
-    gtk_widget_set_visible(t->host.status, !active);
+    gtk_widget_set_visible(t->host.status, !active || t->small);
     if (t->meta) {
         gtk_widget_set_visible(t->meta, active);
         gtk_widget_set_visible(t->canvas, active);
@@ -637,6 +693,7 @@ gboolean trim_mode_handle_event(TrimMode *t, const mpv_event *event)
     }
     if (event->event_id == MPV_EVENT_START_FILE || event->event_id == MPV_EVENT_END_FILE) {
         t->available = t->dragging = FALSE;
+        t->selection_animated = FALSE;
         t->frame = -1;
         ++t->generation;
         if (t->seek_source) { g_source_remove(t->seek_source); t->seek_source = 0; }
@@ -678,10 +735,14 @@ gboolean trim_mode_handle_event(TrimMode *t, const mpv_event *event)
             else send_action(t, "set-enabled", t->requested ? "yes" : "no");
         }
     } else if (event->reply_userdata == TRIM_OBSERVE_BASE + 1) {
-        t->available = flag_field(node, "available");
-        t->first_ms = number_field(node, "start_ms");
-        t->last_ms = number_field(node, "end_ms");
-        t->duration_ms = number_field(node, "duration_ms");
+        gboolean available = flag_field(node, "available");
+        gint64 first = number_field(node, "start_ms"), last = number_field(node, "end_ms");
+        gint64 duration = number_field(node, "duration_ms");
+        update_selection(t, first, last, duration, number_field(node, "file_serial"), available);
+        t->available = available;
+        t->first_ms = first;
+        t->last_ms = last;
+        t->duration_ms = duration;
         if (t->meta) {
             GtkWidget *focus = gtk_window_get_focus(t->host.window);
             for (int i = 0; i < 2; ++i) {
@@ -733,6 +794,7 @@ void trim_mode_shutdown(TrimMode *t)
 {
     if (!t || t->stopped) return;
     t->stopped = TRUE;
+    t->selection_animated = FALSE;
     if (t->load_timeout) { g_source_remove(t->load_timeout); t->load_timeout = 0; }
     if (t->seek_source) { g_source_remove(t->seek_source); t->seek_source = 0; }
     if (t->restore_source) { g_source_remove(t->restore_source); t->restore_source = 0; }
