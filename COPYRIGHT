@@ -1,0 +1,27 @@
+mpv GTK
+Copyright (C) 2026 eml3ss and contributors
+SPDX-License-Identifier: GPL-3.0-or-later
+
+The original application code, documentation, and build files in this
+repository are free software: you can redistribute them and/or modify them
+under the terms of the GNU General Public License as published by the Free
+Software Foundation, either version 3 of the License, or (at your option)
+any later version.
+
+This program is distributed in the hope that it will be useful, but WITHOUT
+ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License in
+LICENSE for more details.
+
+Third-party components retain their original copyright and license terms:
+
+- The Papirus SVGs in data/icons/scalable/ are licensed under GPL version 3.
+  See data/icons/NOTICE.txt, data/icons/LICENSE.GPL3, and
+  data/icons/SOURCES.tsv for attribution, the license, and the source inventory.
+- mpv/libmpv retain their upstream licenses. See
+  tools/stock-mpv-licenses/Copyright, tools/stock-mpv-licenses/LICENSE.GPL,
+  and tools/stock-mpv-licenses/LICENSE.LGPL.
+  The build stages the installed distribution binaries without modification.
+- Files under vendor/ retain the licenses and notices supplied by their
+  respective upstream projects. They are optional development resources.
+- GTK and other runtime libraries retain their respective licenses.
