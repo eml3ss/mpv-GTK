@@ -45,6 +45,10 @@ in `build/` when running locally, or `~/.local/share/mpv-gtk/` after installatio
 Updates preserve existing settings. The settings window includes buttons to
 open `mpv.conf` and `input.conf`.
 
+## Credits
+
+Thanks to [KocTu4eK](https://github.com/KocTu4eK) for the idea behind Trim Mode.
+
 ## License
 
 The application's original code is licensed under
