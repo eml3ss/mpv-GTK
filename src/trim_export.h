@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: LGPL-2.1-or-later */
 #ifndef MPV_GTK_TRIM_EXPORT_H
 #define MPV_GTK_TRIM_EXPORT_H
 

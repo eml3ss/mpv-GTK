@@ -4,11 +4,7 @@ Click the scissors button or press Ctrl+T to switch the player into Trim Mode.
 Click or press it again to restore the playback controls. Video stays in the
 same GTK/Wayland window. The interface uses the current GTK theme and accent.
 
-Trim Mode is implemented entirely in C. It preserves the supplied ModernZ
-plugin's boundary rules, keyframe navigation, lossless export, verification,
-and file-recovery behavior. It does not load a Lua script. Source provenance
-and the backend's LGPL-2.1-or-later license are in
-[data/trim](../data/trim/NOTICE.txt).
+Trim Mode is implemented entirely in C and does not load a Lua script.
 
 ## Controls
 

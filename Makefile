@@ -17,7 +17,6 @@ TARGET := build/mpv-gtk
 CONFIG := build/mpv.conf
 INPUT_CONFIG := build/input.conf
 LOCALE_RESOURCE := build/locales/en.ini
-TRIM_NOTICES := build/trim-licenses/LICENSE.LGPL build/trim-licenses/NOTICE.txt
 TRIM_CONFIG := build/script-opts/trim-mode.conf
 COMMON_SOURCES := src/config.c src/preferences.c src/transport.c src/i18n.c src/input.c src/key_commands.c src/keybindings.c src/keys_page.c src/about.c src/startup_trace.c src/gl_api.c src/chapters.c src/chapter_marks.c src/track_notice.c src/trim.c src/trim_backend.c src/trim_export.c
 COMMON_OBJECTS := build/mpv-gtk-resources.o
@@ -60,12 +59,9 @@ DESKTOP := build/io.github.emless.mpvgtk.desktop
 
 .PHONY: all clean test test-trim test-trim-native install uninstall FORCE
 
-all: $(TARGET) $(CONFIG) $(INPUT_CONFIG) $(LOCALE_RESOURCE) $(TRIM_NOTICES) $(TRIM_CONFIG) $(STOCK_LIB) $(STOCK_ENGINE) $(STOCK_DATA)
+all: $(TARGET) $(CONFIG) $(INPUT_CONFIG) $(LOCALE_RESOURCE) $(TRIM_CONFIG) $(STOCK_LIB) $(STOCK_ENGINE) $(STOCK_DATA)
 
-$(TARGET): | $(TRIM_NOTICES) $(TRIM_CONFIG)
-
-build/trim-licenses/%: data/trim/% | build
-	install -Dm644 "$<" "$@"
+$(TARGET): | $(TRIM_CONFIG)
 
 $(TRIM_CONFIG): data/script-opts/trim-mode.conf | build
 	@if [ ! -e "$@" ] && [ ! -L "$@" ]; then install -Dm600 "$<" "$@"; fi
@@ -270,8 +266,8 @@ install: $(TARGET) $(CONFIG) $(INPUT_CONFIG) $(DESKTOP) $(LOCALE_RESOURCE) $(STO
 	@for license in $(STOCK_LICENSES); do install -Dm644 "$$license" "$(APPDIR)/stock-mpv-licenses/$${license##*/}"; done
 	rm -f "$(APPDIR)/libmpv-gtk-vulkan.so.2" "$(APPDIR)/libmpv-gtk-presenter.so"
 	install -Dm644 "$(LOCALE_RESOURCE)" "$(APPDIR)/locales/en.ini"
-	install -Dm644 "build/trim-licenses/LICENSE.LGPL" "$(APPDIR)/trim-licenses/LICENSE.LGPL"
-	install -Dm644 "build/trim-licenses/NOTICE.txt" "$(APPDIR)/trim-licenses/NOTICE.txt"
+	rm -f "$(APPDIR)/trim-licenses/LICENSE.LGPL" "$(APPDIR)/trim-licenses/NOTICE.txt"
+	@if [ -d "$(APPDIR)/trim-licenses" ]; then rmdir --ignore-fail-on-non-empty "$(APPDIR)/trim-licenses"; fi
 	rm -f "$(APPDIR)/scripts/trim-mode.lua" "$(APPDIR)/scripts/LICENSE.LGPL" "$(APPDIR)/scripts/NOTICE.txt"
 	@if [ ! -e "$(APPDIR)/script-opts/trim-mode.conf" ] && [ ! -L "$(APPDIR)/script-opts/trim-mode.conf" ]; then \
 		install -Dm600 "$(TRIM_CONFIG)" "$(APPDIR)/script-opts/trim-mode.conf"; \
@@ -319,7 +315,7 @@ uninstall:
 
 clean:
 	rm -f "$(TRIM_NATIVE_TEST)"
-	rm -f $(TRIM_NOTICES) build/scripts/trim-mode.lua build/scripts/LICENSE.LGPL build/scripts/NOTICE.txt
+	rm -f build/trim-licenses/LICENSE.LGPL build/trim-licenses/NOTICE.txt build/scripts/trim-mode.lua build/scripts/LICENSE.LGPL build/scripts/NOTICE.txt
 	rm -f "build/mpv-gtk-resources.c" $(COMMON_OBJECTS)
 	rm -f "$(WATCH_LATER_TEST)"
 	rm -f "$(AUTOPLAYLIST_TEST)"

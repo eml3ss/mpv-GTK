@@ -1,6 +1,4 @@
 #define _GNU_SOURCE
-/* SPDX-License-Identifier: LGPL-2.1-or-later
- * Native port of the supplied Trim Mode plugin. See data/trim/NOTICE.txt. */
 #include "trim_backend.h"
 #include "trim_export.h"
 #include "keybindings.h"

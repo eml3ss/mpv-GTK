@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: LGPL-2.1-or-later */
 #define _GNU_SOURCE
 #include "trim_export.h"
 
