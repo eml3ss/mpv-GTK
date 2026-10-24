@@ -43,6 +43,7 @@ from unfinished interface work. Item 16 is tentative.
 
 - [x] Seek immediately while dragging the timeline; display chapter markers.
 - [x] Show a frame thumbnail and timestamp on hover (local-video prototype).
+- [x] Reuse a persistent native decoder with fast keyframe previews and idle-time exact refinement.
 - [x] Enable or disable previews in Interface settings, with immediate application and persistence.
 - [ ] Add a dialog for seeking to a specified hh:mm:ss position.
 

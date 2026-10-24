@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include "seek_preview.h"
+#include "preview_decoder.h"
 
 #include <glib/gstdio.h>
 #include <math.h>
@@ -7,11 +8,8 @@
 #include <string.h>
 #include <sys/stat.h>
 
-#define PREVIEW_COMMAND_BASE (UINT64_C(1) << 48)
-#define PREVIEW_COMMAND_LIMIT (PREVIEW_COMMAND_BASE + (UINT64_C(1) << 32))
-#define PREVIEW_CAPTURE_LIMIT (1024 * 1024)
 #define PREVIEW_CACHE_LIMIT 48
-#define PREVIEW_DEBOUNCE_MS 120
+#define PREVIEW_DEBOUNCE_MS 50
 
 typedef struct {
     struct SeekPreview *owner;
@@ -24,10 +22,12 @@ typedef struct {
 typedef struct {
     gint64 bucket;
     GdkTexture *texture;
+    gboolean refined;
 } PreviewFrame;
 
 struct SeekPreview {
     mpv_handle *mpv;
+    PreviewDecoder *decoder;
     GPtrArray *anchors;
     PreviewAnchor *hover;
     GtkWidget *popover, *picture, *image_area, *spinner, *label;
@@ -35,12 +35,13 @@ struct SeekPreview {
     GdkDisplay *display;
     GQueue cache;
     gboolean enabled, stopped, checked, available, local, inside;
-    gboolean target_ready, cancelling, timed_out;
-    char *path, *stream, *source_key, *ffmpeg, *request_key;
+    gboolean target_ready;
+    char *path, *stream, *source_key, *request_key;
+    gint64 ff_index;
     double duration, offset, end_guard, seconds, pointer_x;
     gint64 bucket, request_bucket;
     guint generation, request_generation;
-    guint debounce_source, timeout_source;
+    guint debounce_source;
     guint64 serial, request;
 };
 
@@ -110,12 +111,19 @@ static PreviewFrame *cached_frame(SeekPreview *p, gint64 bucket)
     return NULL;
 }
 
-static void cache_frame(SeekPreview *p, gint64 bucket, GdkTexture *texture)
+static void cache_frame(SeekPreview *p, gint64 bucket, GdkTexture *texture, gboolean refined)
 {
     PreviewFrame *existing = cached_frame(p, bucket);
-    if (existing) return;
+    if (existing) {
+        if (refined || !existing->refined) {
+            if (texture || !existing->texture) g_set_object(&existing->texture, texture);
+            existing->refined = refined;
+        }
+        return;
+    }
     PreviewFrame *frame = g_new0(PreviewFrame, 1);
     frame->bucket = bucket;
+    frame->refined = refined;
     frame->texture = texture ? g_object_ref(texture) : NULL;
     g_queue_push_head(&p->cache, frame);
     while (g_queue_get_length(&p->cache) > PREVIEW_CACHE_LIMIT)
@@ -128,20 +136,11 @@ static void cancel_debounce(SeekPreview *p)
     p->debounce_source = 0;
 }
 
-static void cancel_timeout(SeekPreview *p)
-{
-    if (p->timeout_source) g_source_remove(p->timeout_source);
-    p->timeout_source = 0;
-}
-
 static void abort_request(SeekPreview *p)
 {
-    if (p->request && !p->cancelling) {
-        p->cancelling = TRUE;
-        mpv_abort_async_command(p->mpv, p->request);
-    }
-    /* Cancellation is asynchronous. Keep the ID until its reply so a second
-     * decoder process cannot start while the old one is still terminating. */
+    preview_decoder_cancel(p->decoder);
+    p->request = 0;
+    g_clear_pointer(&p->request_key, g_free);
 }
 
 void seek_preview_hide(SeekPreview *p)
@@ -155,7 +154,6 @@ void seek_preview_hide(SeekPreview *p)
     p->hover = NULL;
     p->checked = FALSE;
     cancel_debounce(p);
-    cancel_timeout(p);
     abort_request(p);
     if (p->popover) gtk_popover_popdown(GTK_POPOVER(p->popover));
 }
@@ -212,11 +210,17 @@ static void check_source(SeekPreview *p)
     }
     p->available = TRUE;
     p->duration = duration;
+    if (property_flag(p, "demuxer-via-network", FALSE)) {
+        mpv_free_node_contents(&video);
+        forget_local_source(p);
+        return;
+    }
     char *main_path = mpv_get_property_string(p->mpv, "path");
     const char *external = field_text(&video, "external-filename");
     g_autofree char *filename = local_filename(p, *external ? external : main_path);
     mpv_free(main_path);
     gint64 index = field_integer(&video, "ff-index", -1);
+    p->ff_index = index;
     mpv_free_node_contents(&video);
     GStatBuf info;
     if (!filename || g_stat(filename, &info) < 0 || !S_ISREG(info.st_mode)) { forget_local_source(p); return; }
@@ -243,7 +247,6 @@ static void check_source(SeekPreview *p)
     g_free(p->stream); p->stream = g_steal_pointer(&stream);
     p->offset = offset;
     p->local = TRUE;
-    if (!p->ffmpeg) p->ffmpeg = g_find_program_in_path("ffmpeg");
 }
 
 static GtkWidget *css_child(GtkWidget *parent, const char *name)
@@ -370,63 +373,53 @@ static void show_card(SeekPreview *p, PreviewFrame *frame, gboolean loading)
     gtk_popover_present(GTK_POPOVER(p->popover));
 }
 
-static gboolean request_timeout(gpointer data)
+static void show_pending_frame(SeekPreview *p)
+{
+    /* Keep the last thumbnail visible while the persistent decoder catches
+     * up, instead of flashing an empty card between nearby hover targets. */
+    GdkPaintable *paintable = p->picture ? gtk_picture_get_paintable(GTK_PICTURE(p->picture)) : NULL;
+    PreviewFrame previous = {.texture = GDK_IS_TEXTURE(paintable) ? GDK_TEXTURE(paintable) : NULL};
+    show_card(p, previous.texture ? &previous : NULL, previous.texture == NULL);
+}
+
+static void decoder_frame_ready(const PreviewDecoderFrame *frame, gpointer data)
 {
     SeekPreview *p = data;
-    p->timeout_source = 0;
-    if (p->request && !p->stopped) {
-        p->timed_out = TRUE;
-        abort_request(p);
+    if (p->stopped || !p->enabled || !p->inside || frame->token != p->request ||
+        p->request_generation != p->generation || g_strcmp0(p->request_key, p->source_key) != 0) return;
+    GdkTexture *texture = NULL;
+    if (frame->pixels && frame->width > 0 && frame->width <= 256 && frame->height > 0 &&
+        frame->height <= 144 && frame->stride >= frame->width * 4 && frame->stride <= 4096 &&
+        g_bytes_get_size(frame->pixels) >= (gsize)frame->stride * frame->height)
+        texture = gdk_memory_texture_new(frame->width, frame->height,
+            GDK_MEMORY_B8G8R8A8, frame->pixels, (gsize)frame->stride);
+    if (texture || frame->refined) {
+        cache_frame(p, p->request_bucket, texture, frame->refined);
+        g_clear_object(&texture);
+        if (p->hover && p->bucket == p->request_bucket)
+            show_card(p, cached_frame(p, p->bucket), FALSE);
     }
-    return G_SOURCE_REMOVE;
+    if (frame->refined) {
+        p->request = 0;
+        g_clear_pointer(&p->request_key, g_free);
+    }
 }
 
 static void request_frame(SeekPreview *p)
 {
     if (p->stopped || !p->enabled || !p->inside || !p->target_ready || !p->hover || !p->available) return;
     PreviewFrame *cached = cached_frame(p, p->bucket);
-    if (cached) { show_card(p, cached, FALSE); return; }
-    if (!p->local || !p->ffmpeg) { show_card(p, NULL, FALSE); return; }
-    show_card(p, NULL, TRUE);
-    if (p->request) {
-        if (p->request_bucket != p->bucket || p->request_generation != p->generation) abort_request(p);
-        return;
-    }
-    double second = MIN(p->bucket / 2.0, MAX(0, p->duration - p->end_guard)) + p->offset;
-    char time[G_ASCII_DTOSTR_BUF_SIZE];
-    g_ascii_formatd(time, sizeof(time), "%.3f", second);
-    const char *arguments[] = {p->ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin",
-        "-threads", "1", "-filter_threads", "1", "-protocol_whitelist", "file,pipe",
-        "-ss", time, "-seek_timestamp", "1", "-i", p->path, "-map", p->stream,
-        "-frames:v", "1", "-an", "-sn", "-dn", "-vf",
-        "scale=w='max(2,trunc(min(256,144*dar)/2)*2)':h='max(2,trunc(min(144,256/dar)/2)*2)',setsar=1",
-        "-threads", "1", "-pix_fmt", "rgb24", "-c:v", "png", "-f", "image2pipe", "pipe:1", NULL};
-    int count = 0;
-    while (arguments[count]) ++count;
-    g_autofree mpv_node *args = g_new0(mpv_node, count);
-    for (int i = 0; i < count; ++i) args[i] = (mpv_node){.format = MPV_FORMAT_STRING, .u.string = (char *)arguments[i]};
-    mpv_node_list arg_list = {.num = count, .values = args};
-    char *keys[] = {"name", "args", "playback_only", "capture_stdout", "capture_stderr", "capture_size"};
-    mpv_node values[] = {
-        {.format = MPV_FORMAT_STRING, .u.string = "subprocess"},
-        {.format = MPV_FORMAT_NODE_ARRAY, .u.list = &arg_list},
-        {.format = MPV_FORMAT_FLAG, .u.flag = 1},
-        {.format = MPV_FORMAT_FLAG, .u.flag = 1},
-        {.format = MPV_FORMAT_FLAG, .u.flag = 1},
-        {.format = MPV_FORMAT_INT64, .u.int64 = PREVIEW_CAPTURE_LIMIT}
-    };
-    mpv_node_list map = {.num = G_N_ELEMENTS(keys), .keys = keys, .values = values};
-    mpv_node command = {.format = MPV_FORMAT_NODE_MAP, .u.list = &map};
-    p->request = PREVIEW_COMMAND_BASE + ++p->serial;
+    if (cached && cached->refined) { show_card(p, cached, FALSE); return; }
+    if (!p->local) { show_card(p, NULL, FALSE); return; }
+    if (cached) show_card(p, cached, FALSE);
+    else show_pending_frame(p);
+    if (p->request && p->request_bucket == p->bucket && p->request_generation == p->generation) return;
+    p->request = ++p->serial;
     p->request_bucket = p->bucket;
     p->request_generation = p->generation;
     g_free(p->request_key); p->request_key = g_strdup(p->source_key);
-    p->cancelling = p->timed_out = FALSE;
-    if (mpv_command_node_async(p->mpv, p->request, &command) < 0) {
-        p->request = 0;
-        cache_frame(p, p->bucket, NULL);
-        show_card(p, cached_frame(p, p->bucket), FALSE);
-    } else p->timeout_source = g_timeout_add_seconds(5, request_timeout, p);
+    double second = MIN(p->bucket / 2.0, MAX(0, p->duration - p->end_guard)) + p->offset;
+    preview_decoder_request(p->decoder, p->source_key, p->path, p->ff_index, second, p->request);
 }
 
 static gboolean debounce_finished(gpointer data)
@@ -464,20 +457,22 @@ static void hover_motion(GtkEventControllerMotion *controller, double x, double 
     gboolean changed = bucket != p->bucket;
     p->bucket = bucket;
     PreviewFrame *frame = cached_frame(p, bucket);
-    if (frame) {
+    if (frame && frame->refined) {
         cancel_debounce(p);
         if (p->request && p->request_bucket != bucket) abort_request(p);
         p->target_ready = TRUE;
         show_card(p, frame, FALSE);
         return;
     }
-    if (changed || (!p->target_ready && !p->debounce_source)) {
-        p->target_ready = FALSE;
-        cancel_debounce(p);
+    if (changed || (!p->target_ready && !p->debounce_source)) p->target_ready = FALSE;
+    /* Throttle to the latest target without waiting for motion to stop. */
+    if (!p->target_ready && !p->debounce_source)
         p->debounce_source = g_timeout_add(PREVIEW_DEBOUNCE_MS, debounce_finished, p);
+    if (frame) show_card(p, frame, FALSE);
+    else if (p->popover && gtk_widget_get_visible(p->popover)) {
+        if (p->local) show_pending_frame(p);
+        else show_card(p, NULL, FALSE);
     }
-    if (p->popover && gtk_widget_get_visible(p->popover))
-        show_card(p, NULL, p->local && p->ffmpeg != NULL);
     if (p->target_ready) request_frame(p);
 }
 
@@ -500,6 +495,7 @@ SeekPreview *seek_preview_new(mpv_handle *mpv)
     g_return_val_if_fail(mpv != NULL, NULL);
     SeekPreview *p = g_new0(SeekPreview, 1);
     p->mpv = mpv;
+    p->decoder = preview_decoder_new(decoder_frame_ready, p);
     p->enabled = TRUE;
     p->bucket = -1;
     p->anchors = g_ptr_array_new();
@@ -530,6 +526,7 @@ void seek_preview_set_enabled(SeekPreview *p, gboolean enabled)
 {
     if (!p || p->stopped || p->enabled == !!enabled) return;
     p->enabled = !!enabled;
+    preview_decoder_set_enabled(p->decoder, p->enabled);
     if (!p->enabled) {
         seek_preview_hide(p);
         clear_cache(p);
@@ -544,48 +541,7 @@ gboolean seek_preview_handle_event(SeekPreview *p, const mpv_event *event)
         invalidate_source(p);
         return FALSE;
     }
-    if (event->event_id != MPV_EVENT_COMMAND_REPLY || event->reply_userdata < PREVIEW_COMMAND_BASE ||
-        event->reply_userdata >= PREVIEW_COMMAND_LIMIT) return FALSE;
-    if (event->reply_userdata != p->request) return TRUE;
-    cancel_timeout(p);
-    guint generation = p->request_generation;
-    gint64 bucket = p->request_bucket;
-    gboolean cancelled = p->cancelling, timed_out = p->timed_out;
-    p->request = 0;
-    p->cancelling = p->timed_out = FALSE;
-    gboolean same_source = generation == p->generation && g_strcmp0(p->request_key, p->source_key) == 0;
-    if (p->enabled && same_source && (!cancelled || timed_out)) {
-        const mpv_event_command *reply = event->data;
-        const mpv_node *result = reply ? &reply->result : NULL;
-        const mpv_node *output = field(result, "stdout");
-        const void *data = NULL;
-        gsize size = 0;
-        if (output && output->format == MPV_FORMAT_BYTE_ARRAY && output->u.ba) {
-            data = output->u.ba->data; size = output->u.ba->size;
-        }
-        GdkTexture *texture = NULL;
-        guint32 png_width = 0, png_height = 0;
-        if (data && size >= 24 && memcmp(data, "\x89PNG\r\n\x1a\n", 8) == 0 &&
-            memcmp((const guint8 *)data + 12, "IHDR", 4) == 0) {
-            memcpy(&png_width, (const guint8 *)data + 16, sizeof(png_width));
-            memcpy(&png_height, (const guint8 *)data + 20, sizeof(png_height));
-            png_width = GUINT32_FROM_BE(png_width); png_height = GUINT32_FROM_BE(png_height);
-        }
-        if (event->error >= 0 && field_integer(result, "status", -1) == 0 && data &&
-            size >= 24 && size < PREVIEW_CAPTURE_LIMIT && png_width > 0 && png_width <= 256 &&
-            png_height > 0 && png_height <= 144) {
-            g_autoptr(GBytes) bytes = g_bytes_new(data, size);
-            texture = gdk_texture_new_from_bytes(bytes, NULL);
-            if (texture && (gdk_texture_get_width(texture) > 256 || gdk_texture_get_height(texture) > 144))
-                g_clear_object(&texture);
-        }
-        cache_frame(p, bucket, texture);
-        g_clear_object(&texture);
-        if (p->inside && p->hover && p->bucket == bucket) show_card(p, cached_frame(p, bucket), FALSE);
-    }
-    g_clear_pointer(&p->request_key, g_free);
-    if (p->inside && p->target_ready) request_frame(p);
-    return TRUE;
+    return FALSE;
 }
 
 void seek_preview_shutdown(SeekPreview *p)
@@ -593,6 +549,7 @@ void seek_preview_shutdown(SeekPreview *p)
     if (!p || p->stopped) return;
     seek_preview_hide(p);
     p->stopped = TRUE;
+    preview_decoder_set_enabled(p->decoder, FALSE);
     for (guint i = 0; i < p->anchors->len; ++i) {
         PreviewAnchor *anchor = g_ptr_array_index(p->anchors, i);
         g_signal_handlers_disconnect_by_data(anchor->widget, anchor);
@@ -606,6 +563,7 @@ void seek_preview_free(SeekPreview *p)
 {
     if (!p) return;
     seek_preview_shutdown(p);
+    preview_decoder_free(p->decoder);
     if (p->popover) {
         if (gtk_widget_get_parent(p->popover)) gtk_widget_unparent(p->popover);
         g_clear_object(&p->popover);
@@ -618,6 +576,6 @@ void seek_preview_free(SeekPreview *p)
         g_clear_object(&anchor->motion); g_clear_object(&anchor->widget); g_free(anchor);
     }
     g_ptr_array_unref(p->anchors);
-    g_free(p->path); g_free(p->stream); g_free(p->source_key); g_free(p->ffmpeg); g_free(p->request_key);
+    g_free(p->path); g_free(p->stream); g_free(p->source_key); g_free(p->request_key);
     g_free(p);
 }

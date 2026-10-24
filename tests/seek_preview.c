@@ -1,5 +1,5 @@
-/* Exercise decoded hover frames, passive GTK presentation, cancellation, and
- * the persisted toggle using generated media and isolated configuration. */
+/* Exercise persistent decoded hover frames, passive GTK presentation,
+ * cancellation, and the persisted toggle using isolated generated media. */
 #define _GNU_SOURCE
 #include "../src/seek_preview.h"
 #include "../src/i18n.h"
@@ -17,7 +17,7 @@ typedef struct {
     GtkWindow *window;
     GtkWidget *scale, *custom;
     gboolean loaded, restarted;
-    const char *counter;
+    double playback_position;
 } PreviewHost;
 
 static void set_option(mpv_handle *mpv, const char *name, const char *value, gboolean optional)
@@ -129,6 +129,7 @@ static gboolean has_color(GdkTexture *texture, gboolean blue)
     g_autoptr(GBytes) bytes = gdk_texture_downloader_download_bytes(download, &stride);
     const guchar *data = g_bytes_get_data(bytes, NULL);
     const guchar *pixel = data + stride * (height / 2) + 4 * (width / 2);
+    if (pixel[3] < 180) return FALSE;
     return blue ? pixel[2] > 180 && pixel[0] < 70 && pixel[1] < 70
         : pixel[0] > 180 && pixel[2] < 70 && pixel[1] < 70;
 }
@@ -163,7 +164,7 @@ static void assert_playback_unchanged(PreviewHost *host)
     g_assert_cmpint(mpv_get_property(host->mpv, "pause", MPV_FORMAT_FLAG, &paused), >=, 0);
     g_assert_true(paused);
     g_assert_cmpint(mpv_get_property(host->mpv, "time-pos", MPV_FORMAT_DOUBLE, &position), >=, 0);
-    g_assert_cmpfloat(fabs(position - .4), <, .05);
+    g_assert_cmpfloat(fabs(position - host->playback_position), <, .05);
 }
 
 static guint call_count(const char *filename)
@@ -212,8 +213,8 @@ static void save_card(PreviewHost *host, GtkWidget *popover)
 static void generate_media(const char *ffmpeg, const char *filename)
 {
     char *args[] = {(char *)ffmpeg, "-nostdin", "-v", "error",
-        "-f", "lavfi", "-i", "color=c=red:s=160x90:r=24:d=2",
-        "-f", "lavfi", "-i", "color=c=blue:s=160x90:r=24:d=2",
+        "-f", "lavfi", "-i", "color=c=red:s=320x180:r=24:d=2",
+        "-f", "lavfi", "-i", "color=c=blue:s=320x180:r=24:d=2",
         "-filter_complex", "[0:v][1:v]concat=n=2:v=1:a=0,format=yuv420p[v]",
         "-map", "[v]", "-c:v", "libx264", "-preset", "ultrafast", "-g", "24",
         "-threads", "1", (char *)filename, NULL};
@@ -285,19 +286,19 @@ int main(void)
     g_autofree char *tools = g_build_filename(directory, "tools", NULL);
     g_assert_cmpint(g_mkdir(tools, 0700), ==, 0);
     g_autofree char *counter = g_build_filename(directory, "ffmpeg-count", NULL);
-    g_autofree char *hold = g_build_filename(directory, "hold-preview", NULL);
     g_autofree char *wrapper = g_build_filename(tools, "ffmpeg", NULL);
     g_autofree char *quoted_counter = g_shell_quote(counter);
     g_autofree char *quoted_ffmpeg = g_shell_quote(ffmpeg);
-    g_autofree char *quoted_hold = g_shell_quote(hold);
-    g_autofree char *script = g_strdup_printf("#!/bin/sh\nprintf x >> %s\nif [ -f %s ]; then sleep 0.3; fi\nexec %s \"$@\"\n",
-        quoted_counter, quoted_hold, quoted_ffmpeg);
+    /* Generation above uses the real tool. Any subsequent invocation would
+     * reveal a regression to launching a decoder process for each request. */
+    g_autofree char *script = g_strdup_printf("#!/bin/sh\nprintf x >> %s\nexec %s \"$@\"\n",
+        quoted_counter, quoted_ffmpeg);
     g_assert_true(g_file_set_contents(wrapper, script, -1, &error));
     g_assert_cmpint(g_chmod(wrapper, 0700), ==, 0);
     g_autofree char *path = g_strdup(g_getenv("PATH"));
     g_autofree char *with_tools = g_strdup_printf("%s:%s", tools, path ? path : "");
     g_assert_true(g_setenv("PATH", with_tools, TRUE));
-    PreviewHost host = {.counter = counter};
+    PreviewHost host = {.playback_position = .4};
     host.mpv = mpv_create();
     g_assert_nonnull(host.mpv);
     set_option(host.mpv, "config", "no", FALSE);
@@ -357,15 +358,29 @@ int main(void)
     seek_preview_set_enabled(host.preview, i18n_timeline_previews());
     hover(host.scale, .25, TRUE);
     wait_color(&host, host.scale, FALSE);
+    g_assert_cmpuint(call_count(counter), ==, 0);
     assert_playback_unchanged(&host);
     hover(host.scale, .75, FALSE);
     wait_color(&host, host.scale, TRUE);
     assert_playback_unchanged(&host);
-    guint calls = call_count(counter);
+    g_assert_cmpuint(call_count(counter), ==, 0);
+    gint64 cached_started = g_get_monotonic_time();
     hover(host.scale, .25, FALSE);
     wait_color(&host, host.scale, FALSE);
+    double cached_ms = (g_get_monotonic_time() - cached_started) / 1000.0;
+    g_print("Cached hover ready in %.3f ms.\n", cached_ms);
     pump_for(&host, 200000);
-    g_assert_cmpuint(call_count(counter), ==, calls);
+    g_assert_cmpuint(call_count(counter), ==, 0);
+    /* Change targets while the earlier request's exact refinement can still
+     * be pending. A late frame must not replace the most recent red target. */
+    hover(host.scale, .70, FALSE);
+    pump_for(&host, 70000);
+    hover(host.scale, .30, FALSE);
+    wait_color(&host, host.scale, FALSE);
+    pump_for(&host, 250000);
+    g_assert_true(has_color(preview_texture(host.scale), FALSE));
+    assert_playback_unchanged(&host);
+    g_assert_cmpuint(call_count(counter), ==, 0);
     GtkWidget *popover = find_widget(host.scale, GTK_TYPE_POPOVER);
     g_assert_nonnull(popover);
     pump_for(&host, 100000);
@@ -381,50 +396,53 @@ int main(void)
     seek_preview_set_enabled(host.preview, FALSE);
     wait_hidden(&host, popover);
     g_assert_true(gtk_widget_get_has_tooltip(host.custom));
-    calls = call_count(counter);
     hover(host.custom, .25, TRUE);
     pump_for(&host, 250000);
-    g_assert_cmpuint(call_count(counter), ==, calls);
+    g_assert_cmpuint(call_count(counter), ==, 0);
     assert_playback_unchanged(&host);
     seek_preview_set_enabled(host.preview, TRUE);
-    g_assert_true(g_file_set_contents(hold, "hold", -1, &error));
+    /* The persistent provider first supplies a keyframe and refines after
+     * the target settles. Reload while that work can still be pending. */
     hover(host.scale, .40, TRUE);
-    deadline = g_get_monotonic_time() + 3000000;
-    while (call_count(counter) == calls) {
-        if (g_get_monotonic_time() > deadline) g_error("Preview decoder did not start.");
-        poll_host(&host);
-    }
+    pump_for(&host, 80000);
+    assert_playback_unchanged(&host);
     g_assert_cmpint(mpv_command_async(host.mpv, 0, load), >=, 0);
     host.loaded = host.restarted = FALSE;
     wait_loaded(&host);
     pump_for(&host, 450000);
     wait_hidden(&host, popover);
     g_assert_null(preview_texture(host.scale));
-    g_assert_cmpint(g_unlink(hold), ==, 0);
-    calls = call_count(counter);
-    g_assert_true(g_file_set_contents(hold, "hold", -1, &error));
-    hover(host.custom, .75, TRUE);
-    deadline = g_get_monotonic_time() + 3000000;
-    while (call_count(counter) == calls) {
-        if (g_get_monotonic_time() > deadline) g_error("Shutdown fixture decoder did not start.");
-        poll_host(&host);
-    }
+    g_assert_cmpuint(call_count(counter), ==, 0);
+    g_assert_cmpint(mpv_get_property(host.mpv, "time-pos", MPV_FORMAT_DOUBLE, &host.playback_position), >=, 0);
+    hover(host.custom, .62, TRUE);
+    pump_for(&host, 80000);
+    seek_preview_set_enabled(host.preview, FALSE);
+    wait_hidden(&host, popover);
+    pump_for(&host, 200000);
+    g_assert_null(preview_texture(host.custom));
+    g_assert_true(gtk_widget_get_has_tooltip(host.custom));
+    assert_playback_unchanged(&host);
+    g_assert_cmpuint(call_count(counter), ==, 0);
+    seek_preview_set_enabled(host.preview, TRUE);
+    hover(host.custom, .80, TRUE);
+    pump_for(&host, 80000);
     g_autoptr(GtkEventController) stopped_motion = motion_controller(host.custom);
     seek_preview_shutdown(host.preview);
     wait_hidden(&host, popover);
-    calls = call_count(counter);
     g_signal_emit_by_name(stopped_motion, "enter", gtk_widget_get_width(host.custom) * .75, 16.0);
     pump_for(&host, 450000);
-    g_assert_cmpuint(call_count(counter), ==, calls);
+    g_assert_cmpuint(call_count(counter), ==, 0);
     g_assert_null(preview_texture(host.custom));
-    g_assert_cmpint(g_unlink(hold), ==, 0);
+    assert_playback_unchanged(&host);
     gtk_window_destroy(host.window);
     seek_preview_free(host.preview);
     host.preview = NULL;
+    /* Deliver any already queued worker completions after the view is gone. */
+    pump_for(&host, 250000);
     mpv_terminate_destroy(host.mpv);
     if (path) g_setenv("PATH", path, TRUE); else g_unsetenv("PATH");
     g_assert_no_error(error);
     remove_tree(directory);
-    puts("PASS hover previews: persisted toggle, decoded red/blue frames, timestamp, shared cached presentation, unchanged playback, cancellation and shutdown.");
+    puts("PASS persistent hover previews: no FFmpeg subprocesses, persisted toggle, decoded red/blue frames, timestamps, shared cache, unchanged playback, latest-target cancellation and shutdown.");
     return 0;
 }

@@ -18,7 +18,7 @@ See the [roadmap](ROADMAP.md) for planned features and implementation progress.
 
 Requires Linux with Wayland, GTK 4.22+, mpv/libmpv, libepoxy, a C11 compiler,
 Make, pkg-config, Python 3, and `glib-compile-resources`.
-FFmpeg is required for Trim Mode (`ffmpeg`, `ffprobe`) and timeline previews (`ffmpeg`).
+Trim Mode additionally requires FFmpeg (`ffmpeg` and `ffprobe`).
 
 ```sh
 git clone https://github.com/eml3ss/mpv-GTK.git
