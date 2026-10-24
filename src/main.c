@@ -35,7 +35,7 @@
 #include "trim.h"
 
 #define APP_ID "io.github.emless.mpvgtk"
-#define APP_VERSION "0.16.1"
+#define APP_VERSION "0.17.0"
 #define APP_ICON_NAME APP_ID
 #define HWDEC_REFRESH_ID UINT64_C(10001)
 #define HWDEC_SET_ID UINT64_C(10002)
@@ -4360,6 +4360,8 @@ int main(int argc, char **argv)
     continue_render_load(&p);
     /* Render context was freed by GLArea::unrealize with its context current.
      * Only now may we synchronously wait for the mpv core to terminate. */
+    trim_mode_free(p.trim);
+    p.trim = NULL;
     if (p.mpv) {
         mpv_set_wakeup_callback(p.mpv, NULL, NULL);
         startup_trace_mark("mpv core cleanup started");
@@ -4382,7 +4384,6 @@ int main(int argc, char **argv)
     for (guint i = 0; i < G_N_ELEMENTS(p.playlist_values); ++i)
         g_free(p.playlist_values[i]);
     clear_playback_values(&p.playback);
-    trim_mode_free(p.trim);
     g_object_unref(p.application);
     g_ptr_array_unref(p.pending);
     g_queue_clear_full(&p.pending_commands, (GDestroyNotify)g_strfreev);

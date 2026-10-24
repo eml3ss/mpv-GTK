@@ -4,10 +4,11 @@ Click the scissors button or press Ctrl+T to switch the player into Trim Mode.
 Click or press it again to restore the playback controls. Video stays in the
 same GTK/Wayland window. The interface uses the current GTK theme and accent.
 
-The GTK frontend uses the adapted backend from the supplied ModernZ Trim Mode
-plugin. Its boundary rules, keyframe navigation, lossless export, verification,
-and file-recovery logic are retained. Source provenance and the backend's
-LGPL-2.1-or-later license are in [data/scripts](../data/scripts/NOTICE.txt).
+Trim Mode is implemented entirely in C. It preserves the supplied ModernZ
+plugin's boundary rules, keyframe navigation, lossless export, verification,
+and file-recovery behavior. It does not load a Lua script. Source provenance
+and the backend's LGPL-2.1-or-later license are in
+[data/trim](../data/trim/NOTICE.txt).
 
 ## Controls
 
@@ -33,6 +34,8 @@ invalid values are discarded on blur. Escape cancels the edit. The start must
 precede the end, and both boundaries must remain within the file duration.
 User keybindings retain priority over the trim defaults. Trim shortcuts are
 inactive while a time field is being edited or playback mode is selected.
+Existing Trim Mode message and binding names are handled by a native mpv
+client for compatibility.
 
 In narrower windows, the boundary controls occupy their own centered row.
 The remaining toolbar controls keep their normal alignment.
@@ -53,17 +56,22 @@ pause state. A native GTK progress card displays the current export phase.
 
 ## Configuration and loading
 
-The backend loads when Trim Mode is first used; its widgets and keyframe scan
-are also deferred. Keyframe scanning is asynchronous and caches recent files.
+The native backend initializes when Trim Mode is first used; its widgets and
+keyframe scan are also deferred. Keyframe scanning is asynchronous and caches recent files.
 Markers are drawn from cached geometry, independently of video frame updates.
 
 Options live in `script-opts/trim-mode.conf` beside the real executable.
 Updates preserve this file. Available options are `remember`, `open-copy`,
 `open-replace`, `ffmpeg_path`, and `ffprobe_path`. The defaults open exported
 results and do not remember the mode. Enabling `remember` restores the saved
-mode and loads its backend at startup. State stays in the player directory.
+mode and initializes its backend at startup. State stays in the player directory.
 The system mpv plugin and configuration are unchanged.
 
 The focused integration check, `make test-trim`, uses generated media and an
 isolated configuration to exercise activation, keyframes, boundary validation,
-copy/replacement export, reopening, and shutdown.
+copy/replacement export, reopening, and shutdown with all Lua scripts disabled.
+It also checks filename collisions, tool failures, concurrent source changes,
+and cancellation during export. Its native check deliberately fails opening a
+replacement and verifies that rollback restores the original bytes, permissions,
+playback position, and pause state. Run `make test-trim-native` to exercise that
+recovery path without a graphical display.

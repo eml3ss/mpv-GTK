@@ -97,6 +97,7 @@ implementation task. Queue restoration remains a separate task under item 2.
 - [x] Keep the standard toolbar buttons aligned in both trim layouts.
 - [x] Edit start/end times and set either boundary from the playback position.
 - [x] Navigate previous/next keyframes and preserve mode-specific shortcuts.
-- [x] Export a separate copy or replace the original using the existing lossless backend.
+- [x] Export a separate copy or replace the original using the native lossless backend.
 - [x] Preserve export verification, backup/rollback, result opening, and playback state.
-- [x] Show native GTK export progress; load the backend and trim controls on demand.
+- [x] Show native GTK export progress; initialize the backend and trim controls on demand.
+- [x] Implement all Trim Mode logic in C, including keyframes, validation, export, and recovery.

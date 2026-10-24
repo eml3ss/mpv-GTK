@@ -1,11 +1,11 @@
 #include "trim.h"
+#include "trim_backend.h"
 #include "i18n.h"
 #include "transport.h"
 
 #include <math.h>
 #include <string.h>
 
-#define TRIM_LOAD_ID (UINT64_C(1) << 39)
 #define TRIM_OBSERVE_BASE (UINT64_C(1) << 40)
 #define TRIM_FRAME_ID (UINT64_C(1) << 41)
 #define TRIM_SELECTION_DURATION_US INT64_C(200000)
@@ -15,6 +15,7 @@ typedef enum { SCISSORS, KEY_PREVIOUS, KEY_NEXT, SET_START, SET_END,
 
 struct TrimMode {
     TrimHost host;
+    TrimBackend *backend;
     char *config_path;
     GtkWidget *button, *meta, *canvas, *group, *entries[2], *keys[2];
     GtkWidget *play_icon, *exports[2], *progress, *progress_label, *length;
@@ -22,9 +23,9 @@ struct TrimMode {
     cairo_path_t *marks;
     int marks_width, marks_height;
     gint64 marks_duration;
-    gboolean active, available, ready, loading, stopped, busy, updating, dragging, small;
+    gboolean active, available, ready, stopped, busy, updating, dragging, small;
     int requested;
-    guint load_timeout, seek_source, restore_source;
+    guint seek_source, restore_source;
     guint64 serial, entry_serial[2];
     char *submitted[2];
     gboolean enter_pending[2];
@@ -41,9 +42,9 @@ struct TrimMode {
 
 static void send_action(TrimMode *t, const char *action, const char *argument)
 {
-    if (t->stopped || !t->ready) return;
-    const char *args[] = {"script-message-to", "trim_mode", action, argument, NULL};
-    mpv_command_async(t->host.mpv, 0, args);
+    if (t->stopped || !t->backend) return;
+    const char *args[] = {argument};
+    trim_backend_action(t->backend, action, argument ? 1 : 0, args);
 }
 
 static const mpv_node *field(const mpv_node *map, const char *key)
@@ -157,9 +158,8 @@ static void commit_entry(TrimMode *t, int side, gboolean enter)
     g_free(t->submitted[side]);
     t->submitted[side] = g_strdup(text);
     g_autofree char *serial = g_strdup_printf("%" G_GUINT64_FORMAT, t->serial);
-    const char *args[] = {"script-message-to", "trim_mode", "set-time",
-        side ? "end" : "start", text, serial, NULL};
-    mpv_command_async(t->host.mpv, 0, args);
+    const char *args[] = {side ? "end" : "start", text, serial};
+    trim_backend_action(t->backend, "set-time", G_N_ELEMENTS(args), args);
 }
 
 static int entry_side(GtkWidget *entry)
@@ -549,37 +549,19 @@ static void set_active(TrimMode *t, gboolean active)
     if (!active) send_action(t, "gtk-focus", "no");
 }
 
-static gboolean load_failed(gpointer data)
-{
-    TrimMode *t = data;
-    t->load_timeout = 0;
-    t->loading = FALSE;
-    t->requested = -1;
-    t->host.message(tr("Не удалось загрузить backend обрезки."), TRUE, t->host.data);
-    return G_SOURCE_REMOVE;
-}
-
 static void load_backend(TrimMode *t)
 {
-    if (t->stopped || t->ready || t->loading) return;
-    g_autofree char *executable = g_file_read_link("/proc/self/exe", NULL);
-    if (!executable) { load_failed(t); return; }
-    const char *deleted = " (deleted)";
-    if (g_str_has_suffix(executable, deleted)) executable[strlen(executable) - strlen(deleted)] = '\0';
-    g_autofree char *directory = g_path_get_dirname(executable);
-    g_autofree char *script = g_build_filename(directory, "scripts", "trim-mode.lua", NULL);
-    if (!g_file_test(script, G_FILE_TEST_IS_REGULAR)) { load_failed(t); return; }
-    mpv_set_property_string(t->host.mpv, "user-data/mpv-gtk-trim-config", t->config_path);
-    static const struct { const char *name; mpv_format format; } properties[] = {
-        {"user-data/trim-mode", MPV_FORMAT_NODE}, {"user-data/trim-controls", MPV_FORMAT_NODE},
-        {"user-data/trim-export", MPV_FORMAT_NODE}, {"user-data/trim-field-result", MPV_FORMAT_NODE}
+    if (t->stopped || t->backend) return;
+    static const char *properties[] = {
+        "user-data/trim-mode", "user-data/trim-controls",
+        "user-data/trim-export", "user-data/trim-field-result"
     };
     for (guint i = 0; i < G_N_ELEMENTS(properties); ++i)
-        mpv_observe_property(t->host.mpv, TRIM_OBSERVE_BASE + i, properties[i].name, properties[i].format);
-    t->loading = TRUE;
-    const char *args[] = {"load-script", script, NULL};
-    if (mpv_command_async(t->host.mpv, TRIM_LOAD_ID, args) < 0) { load_failed(t); return; }
-    t->load_timeout = g_timeout_add_seconds(5, load_failed, t);
+        mpv_observe_property(t->host.mpv, TRIM_OBSERVE_BASE + i, properties[i], MPV_FORMAT_NODE);
+    t->backend = trim_backend_new(t->host.mpv, t->config_path);
+    t->ready = t->backend != NULL;
+    if (t->ready && t->requested >= 0)
+        trim_backend_set_enabled(t->backend, t->requested != 0);
 }
 
 static gboolean restore_mode(gpointer data)
@@ -683,6 +665,7 @@ void trim_mode_translate(TrimMode *t)
 gboolean trim_mode_handle_event(TrimMode *t, const mpv_event *event)
 {
     if (!t || t->stopped) return FALSE;
+    if (t->backend && trim_backend_handle_event(t->backend, event)) return TRUE;
     if (event->event_id == MPV_EVENT_GET_PROPERTY_REPLY && event->reply_userdata == TRIM_FRAME_ID) {
         const mpv_event_property *property = event->data;
         t->frame_pending = FALSE;
@@ -700,13 +683,6 @@ gboolean trim_mode_handle_event(TrimMode *t, const mpv_event *event)
         update_sensitivity(t);
         return FALSE;
     }
-    if (event->event_id == MPV_EVENT_COMMAND_REPLY && event->reply_userdata == TRIM_LOAD_ID) {
-        if (event->error < 0 && !t->ready) {
-            if (t->load_timeout) { g_source_remove(t->load_timeout); t->load_timeout = 0; }
-            load_failed(t);
-        }
-        return TRUE;
-    }
     if (event->event_id != MPV_EVENT_PROPERTY_CHANGE || event->reply_userdata < TRIM_OBSERVE_BASE ||
         event->reply_userdata > TRIM_OBSERVE_BASE + 3) return FALSE;
     const mpv_event_property *property = event->data;
@@ -716,8 +692,6 @@ gboolean trim_mode_handle_event(TrimMode *t, const mpv_event *event)
     if (node->format != MPV_FORMAT_NODE_MAP) return TRUE;
     if (event->reply_userdata == TRIM_OBSERVE_BASE) {
         t->ready = TRUE;
-        t->loading = FALSE;
-        if (t->load_timeout) { g_source_remove(t->load_timeout); t->load_timeout = 0; }
         set_active(t, flag_field(node, "enabled"));
         const mpv_node *keyframes = field(node, "keyframes");
         g_array_set_size(t->keyframes, 0);
@@ -795,7 +769,7 @@ void trim_mode_shutdown(TrimMode *t)
     if (!t || t->stopped) return;
     t->stopped = TRUE;
     t->selection_animated = FALSE;
-    if (t->load_timeout) { g_source_remove(t->load_timeout); t->load_timeout = 0; }
+    trim_backend_shutdown(t->backend);
     if (t->seek_source) { g_source_remove(t->seek_source); t->seek_source = 0; }
     if (t->restore_source) { g_source_remove(t->restore_source); t->restore_source = 0; }
 }
@@ -804,6 +778,7 @@ void trim_mode_free(TrimMode *t)
 {
     if (!t) return;
     trim_mode_shutdown(t);
+    trim_backend_free(t->backend);
     /* A forced application quit can leave windows alive until app disposal.
      * Detach our owned roots before freeing callbacks' shared state. */
     GtkWidget *roots[] = {t->meta, t->canvas, t->group, t->progress, t->button};

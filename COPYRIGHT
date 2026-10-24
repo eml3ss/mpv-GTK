@@ -22,8 +22,8 @@ Third-party components retain their original copyright and license terms:
   tools/stock-mpv-licenses/Copyright, tools/stock-mpv-licenses/LICENSE.GPL,
   and tools/stock-mpv-licenses/LICENSE.LGPL.
   The build stages the installed distribution binaries without modification.
-- The adapted Trim Mode backend in data/scripts/trim-mode.lua is licensed
-  under LGPL-2.1-or-later. See data/scripts/NOTICE.txt and data/scripts/LICENSE.LGPL.
+- The native Trim Mode backend in src/trim_backend.c and src/trim_export.c
+  retains LGPL-2.1-or-later. See data/trim/NOTICE.txt and data/trim/LICENSE.LGPL.
 - Files under vendor/ retain the licenses and notices supplied by their
   respective upstream projects. They are optional development resources.
 - GTK and other runtime libraries retain their respective licenses.

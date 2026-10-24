@@ -16,9 +16,28 @@ source=tmp/'Unicode Ω video.mp4'
 subprocess.run(['ffmpeg','-nostdin','-v','error','-f','lavfi','-i','testsrc2=size=160x90:rate=25:duration=4','-f','lavfi','-i','sine=sample_rate=48000:duration=4','-c:v','libx264','-preset','ultrafast','-g','25','-keyint_min','25','-sc_threshold','0','-threads','1','-c:a','aac','-shortest',str(source)],check=True)
 before=hashlib.sha256(source.read_bytes()).hexdigest()
 (tmp/'script-opts').mkdir()
-(tmp/'script-opts/trim-mode.conf').write_text('remember=no\nopen-copy=no\nopen-replace=yes\n')
+# A transparent tool wrapper permits deterministic failures without touching
+# anything outside this generated fixture directory.
+wrapper=tmp/'ffmpeg-wrapper'
+wrapper.write_text(
+    '#!/usr/bin/env python3\n'
+    'from pathlib import Path\nimport subprocess, sys, time\n'
+    'root=Path(__file__).parent\n'
+    'if (root/"fail-tool").exists():sys.exit(23)\n'
+    f'code=subprocess.run([{shutil.which("ffmpeg")!r},*sys.argv[1:]]).returncode\n'
+    'if code==0 and "copy" in sys.argv and (root/"hold-export").exists():\n'
+    ' (root/"export-ready").write_text("ready")\n'
+    ' deadline=time.monotonic()+8\n'
+    ' while not (root/"release-export").exists() and time.monotonic()<deadline:time.sleep(.01)\n'
+    'sys.exit(code)\n')
+wrapper.chmod(0o700)
+(tmp/'script-opts/trim-mode.conf').write_text(
+    f'remember=no\nopen-copy=no\nopen-replace=yes\nffmpeg_path={wrapper}\n')
 ipc=tmp/'ipc.sock'
-(tmp/'mpv.conf').write_text(f'hwdec=no\nao=null\npause=yes\ninput-ipc-server={ipc}\n')
+(tmp/'mpv.conf').write_text(
+    f'hwdec=no\nao=null\npause=yes\ninput-ipc-server={ipc}\n'
+    'load-scripts=no\nosc=no\nytdl=no\nload-stats-overlay=no\nload-console=no\n'
+    'load-auto-profiles=no\nload-select=no\nload-positioning=no\nload-commands=no\nload-context-menu=no\n')
 (tmp/'input.conf').write_text('')
 (tmp/'interface.conf').write_text('[Interface]\nlanguage=en\n')
 env=os.environ.copy();env['MPV_GTK_CONFIG_FILE']=str(tmp/'mpv.conf')
@@ -66,16 +85,20 @@ try:
     state=wait(lambda:prop('user-data/trim-mode'),lambda x:x and x.get('enabled') and len(x.get('keyframes',[]))>=4)
     controls=wait(lambda:prop('user-data/trim-controls'),lambda x:x and x.get('available'))
     assert controls['start_ms']==0 and controls['end_ms']==4000,controls
-    print('PASS lazy GTK activation, keyframe scan, and initial range',flush=True)
+    print('PASS native activation and keyframes with all Lua scripts disabled',flush=True)
     call('seek',1.1,'absolute+exact')
     wait(lambda:prop('time-pos'),lambda x:x is not None and abs(x-1.1)<.05)
     call('keypress','i')
     wait(lambda:prop('user-data/trim-controls'),lambda x:x and abs(x['start_ms']-1100)<50)
+    call('seek',1.2,'absolute+exact')
+    wait(lambda:prop('time-pos'),lambda x:x is not None and abs(x-1.2)<.03)
+    call('script-binding','trim-mode-set-start')
+    wait(lambda:prop('user-data/trim-controls'),lambda x:x and abs(x['start_ms']-1200)<30)
     action('keyframe','previous')
     wait(lambda:prop('time-pos'),lambda x:x is not None and abs(x-1)<.03)
     action('keyframe','next')
     wait(lambda:prop('time-pos'),lambda x:x is not None and abs(x-2)<.03)
-    print('PASS scoped I shortcut and previous/next keyframes',flush=True)
+    print('PASS scoped keys, legacy binding names, and previous/next keyframes',flush=True)
     action('set-time','start','00:00:01.000','1')
     result=wait(lambda:prop('user-data/trim-field-result'),lambda x:x and x.get('serial')=='1');assert result['valid'],result
     action('set-time','end','3.000','2')
@@ -90,6 +113,15 @@ try:
     copy=Path(result['path']);assert copy.exists(),result
     assert hashlib.sha256(source.read_bytes()).hexdigest()==before
     print('PASS copy export; source bytes unchanged',flush=True)
+    copy_hash=hashlib.sha256(copy.read_bytes()).hexdigest()
+    action('export','keep')
+    wait(lambda:prop('user-data/trim-export'),lambda x:x and x.get('busy'))
+    result=wait(lambda:prop('user-data/trim-export'),lambda x:x and not x.get('busy') and 'success' in x,seconds=12)
+    assert result['success'],result
+    assert Path(result['path'])!=copy
+    assert hashlib.sha256(copy.read_bytes()).hexdigest()==copy_hash
+    assert hashlib.sha256(source.read_bytes()).hexdigest()==before
+    print('PASS repeated copy export never overwrites an existing result',flush=True)
     action('export','replace')
     wait(lambda:prop('user-data/trim-export'),lambda x:x and x.get('busy'))
     result=wait(lambda:prop('user-data/trim-export'),lambda x:x and not x.get('busy') and 'success' in x,seconds=12)
@@ -102,9 +134,36 @@ try:
     call('script-message','mpv-gtk','trim')
     wait(lambda:prop('user-data/trim-mode'),lambda x:x and not x.get('enabled'))
     print('PASS return to player mode',flush=True)
+    call('script-message','mpv-gtk','trim')
+    wait(lambda:prop('user-data/trim-mode'),lambda x:x and x.get('enabled'))
+    replacement_bytes=source.read_bytes()
+    (tmp/'fail-tool').touch()
+    action('export','replace')
+    result=wait(lambda:prop('user-data/trim-export'),lambda x:x and not x.get('busy') and x.get('success') is False)
+    assert not result['success'],result
+    assert source.read_bytes()==replacement_bytes
+    (tmp/'fail-tool').unlink()
+    print('PASS failed FFmpeg never replaces the source',flush=True)
+    (tmp/'hold-export').touch()
+    action('export','replace')
+    wait(lambda:(tmp/'export-ready').exists())
+    modified_bytes=source.read_bytes()+b'\0Native trim concurrent edit\n'
+    source.write_bytes(modified_bytes)
+    (tmp/'release-export').touch()
+    result=wait(lambda:prop('user-data/trim-export'),lambda x:x and not x.get('busy') and 'success' in x)
+    assert not result['success'],result
+    assert 'changed' in result.get('error','').lower(),result
+    assert source.read_bytes()==modified_bytes
+    print('PASS concurrent source changes are preserved and replacement refused',flush=True)
+    (tmp/'export-ready').unlink()
+    (tmp/'release-export').unlink()
+    action('export','replace')
+    wait(lambda:(tmp/'export-ready').exists())
     call('quit')
     process.wait(timeout=5)
     assert process.returncode==0,process.returncode
+    assert source.read_bytes()==modified_bytes
+    print('PASS shutdown during export preserves source bytes',flush=True)
     output=(tmp/'player.log').read_text()
     assert 'CRITICAL' not in output and 'Lua error' not in output,output
     print('PASS clean shutdown; no GTK criticals or Lua errors',flush=True)
