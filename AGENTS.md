@@ -2,8 +2,9 @@
 
 ## Communication and documentation
 
-- Communicate with the user in Russian unless asked otherwise.
-- Write commit messages and README.md in English.
+- Follow the user's language in conversation.
+- Write documentation, code comments, diagnostics, and commit messages in
+  English. Preserve the player's localization and its test expectations.
 - Keep README.md short: purpose, main features, build/install instructions,
   configuration paths, and license. Put detailed technical information in docs/.
 

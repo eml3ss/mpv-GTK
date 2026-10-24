@@ -34,7 +34,7 @@ static void make_chapter_media(const char *metadata, char *chapter_file, char *p
     static const char text[] =
         ";FFMETADATA1\n"
         "[CHAPTER]\nTIMEBASE=1/1000\nSTART=1000\nEND=8000\ntitle=Opening\n"
-        "[CHAPTER]\nTIMEBASE=1/1000\nSTART=8000\nEND=15000\ntitle=Middle · Русский\n"
+        "[CHAPTER]\nTIMEBASE=1/1000\nSTART=8000\nEND=15000\ntitle=Middle · Unicode Ω\n"
         "[CHAPTER]\nTIMEBASE=1/1000\nSTART=15000\nEND=18000\ntitle=Finale\n";
     g_autoptr(GError) error = NULL;
     g_assert_true(g_file_set_contents(metadata, text, -1, &error));
@@ -69,7 +69,7 @@ static const mpv_node *map_value(const mpv_node *map, const char *key)
 
 static void check_snapshot(const mpv_event_property *property, int expected)
 {
-    static const char *titles[] = {"Opening", "Middle · Русский", "Finale"};
+    static const char *titles[] = {"Opening", "Middle · Unicode Ω", "Finale"};
     static const double times[] = {1, 8, 15};
     g_assert_nonnull(property);
     g_assert_cmpstr(property->name, ==, "chapter-list");

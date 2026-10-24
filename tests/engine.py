@@ -223,7 +223,7 @@ def main() -> int:
     try:
         with tempfile.TemporaryDirectory(prefix="mpv-gtk-engine-") as temporary:
             for fps in (1, 24):
-                clip = Path(temporary) / f"sample {fps}fps Кириллица.mp4"
+                clip = Path(temporary) / f"sample {fps}fps Unicode Ω.mp4"
                 generate_clip(ffmpeg, clip, fps)
                 run_case(clip, fps)
     except (AssertionError, OSError, RuntimeError, subprocess.TimeoutExpired) as error:

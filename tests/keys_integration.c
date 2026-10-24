@@ -356,7 +356,7 @@ static void check_subtitle_notice_text(KeysHost *host)
                     G_MENU_ATTRIBUTE_LABEL, "s", &label));
         }
         g_assert_nonnull(label);
-        g_assert_nonnull(strstr(label, audio ? "Русский звук" : "Русские субтитры"));
+        g_assert_nonnull(strstr(label, audio ? "Dubbed audio · Ω" : "Translated subtitles · Ω"));
         g_assert_nonnull(strstr(label, "rus"));
         g_autofree char *text = track_notice_text(p, audio, "2");
         g_assert_cmpstr(text, ==, label);
@@ -482,10 +482,10 @@ static void check_quick_subtitles(KeysHost *host, const char *directory)
         "-c:v", "mpeg4", "-c:a", "flac", "-c:s", "srt",
         "-disposition:a:0", "default", "-disposition:a:1", "0",
         "-metadata:s:a:0", "title=Original audio", "-metadata:s:a:0", "language=eng",
-        "-metadata:s:a:1", "title=Русский звук", "-metadata:s:a:1", "language=rus",
+        "-metadata:s:a:1", "title=Dubbed audio · Ω", "-metadata:s:a:1", "language=rus",
         "-disposition:s:0", "default", "-disposition:s:1", "0",
         "-metadata:s:s:0", "title=Original subtitles", "-metadata:s:s:0", "language=eng",
-        "-metadata:s:s:1", "title=Русские субтитры", "-metadata:s:s:1", "language=rus",
+        "-metadata:s:s:1", "title=Translated subtitles · Ω", "-metadata:s:s:1", "language=rus",
         filename, NULL
     };
     g_autofree char *messages = NULL;

@@ -244,7 +244,7 @@ int main(void)
     g_assert_true(g_setenv("XDG_STATE_HOME", state, TRUE));
     g_assert_true(g_setenv("XDG_CACHE_HOME", cache, TRUE));
     g_assert_true(g_setenv("XDG_CONFIG_HOME", configuration, TRUE));
-    g_autofree char *clip = g_build_filename(root, "clip with spaces · тест.wav", NULL);
+    g_autofree char *clip = g_build_filename(root, "clip with spaces · Unicode Ω.wav", NULL);
     char *args[] = {"ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
         "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=8000:duration=12",
         "-c:a", "pcm_s16le", clip, NULL};

@@ -34,7 +34,7 @@
 #include "track_notice.h"
 
 #define APP_ID "io.github.emless.mpvgtk"
-#define APP_VERSION "0.15.2"
+#define APP_VERSION "0.15.3"
 #define APP_ICON_NAME APP_ID
 #define HWDEC_REFRESH_ID UINT64_C(10001)
 #define HWDEC_SET_ID UINT64_C(10002)
@@ -4195,7 +4195,7 @@ int main(int argc, char **argv)
          "Media files or URLs", "FILE…"},
         {NULL, 0, 0, 0, NULL, NULL, NULL}
     };
-    g_autoptr(GOptionContext) context = g_option_context_new("— независимый GTK-интерфейс для mpv");
+    g_autoptr(GOptionContext) context = g_option_context_new("— a responsive GTK interface for mpv");
     g_option_context_add_main_entries(context, options, NULL);
     g_autoptr(GError) error = NULL;
     if (!g_option_context_parse(context, &argc, &argv, &error)) {
@@ -4274,7 +4274,7 @@ int main(int argc, char **argv)
     gboolean gtk_initialized = gtk_init_check();
     gl_api_environment_end(&gl_environment);
     if (!gtk_initialized) {
-        g_printerr("mpv-gtk: не удалось подключиться к графической сессии Wayland\n");
+        g_printerr("mpv-gtk: could not connect to the Wayland session\n");
         mpv_terminate_destroy(p.mpv);
         if (p.gl_library) dlclose(p.gl_library);
         if (p.wake_fd >= 0) close(p.wake_fd);

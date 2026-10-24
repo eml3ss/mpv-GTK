@@ -132,7 +132,7 @@ static gboolean test_gtk_init_check(void)
 static void capture_diagnostic(const char *message)
 {
     g_assert_cmpstr(message, ==,
-        "mpv-gtk: не удалось подключиться к графической сессии Wayland\n");
+        "mpv-gtk: could not connect to the Wayland session\n");
     diagnostic_calls++;
 }
 
