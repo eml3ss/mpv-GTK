@@ -24,6 +24,9 @@ void preview_decoder_request(PreviewDecoder *decoder, const char *source_key,
                               const char *filename, gint64 ff_index,
                               double seconds, guint64 token);
 void preview_decoder_cancel(PreviewDecoder *decoder);
+/* Enable the headless copying decoder only when the main video already uses
+ * NVIDIA decoding. Changing it recreates the worker core asynchronously. */
+void preview_decoder_set_hardware(PreviewDecoder *decoder, gboolean nvdec);
 void preview_decoder_set_enabled(PreviewDecoder *decoder, gboolean enabled);
 void preview_decoder_free(PreviewDecoder *decoder);
 

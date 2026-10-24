@@ -79,11 +79,16 @@ static GtkEventController *motion_controller(GtkWidget *widget)
     return NULL;
 }
 
-static void hover(GtkWidget *widget, double fraction, gboolean enter)
+static void hover_at(GtkWidget *widget, double fraction, double y, gboolean enter)
 {
     g_autoptr(GtkEventController) controller = motion_controller(widget);
     double x = gtk_widget_get_width(widget) * fraction;
-    g_signal_emit_by_name(controller, enter ? "enter" : "motion", x, gtk_widget_get_height(widget) / 2.0);
+    g_signal_emit_by_name(controller, enter ? "enter" : "motion", x, y);
+}
+
+static void hover(GtkWidget *widget, double fraction, gboolean enter)
+{
+    hover_at(widget, fraction, gtk_widget_get_height(widget) / 2.0, enter);
 }
 
 static void leave(GtkWidget *widget)
@@ -121,8 +126,10 @@ static gboolean has_color(GdkTexture *texture, gboolean blue)
 {
     if (!texture) return FALSE;
     int width = gdk_texture_get_width(texture), height = gdk_texture_get_height(texture);
-    g_assert_cmpint(width, <=, 256);
-    g_assert_cmpint(height, <=, 144);
+    g_assert_cmpint(width, >, 0);
+    g_assert_cmpint(height, >, 0);
+    g_assert_cmpint(width, <=, 160);
+    g_assert_cmpint(height, <=, 90);
     g_autoptr(GdkTextureDownloader) download = gdk_texture_downloader_new(texture);
     gdk_texture_downloader_set_format(download, GDK_MEMORY_R8G8B8A8);
     gsize stride;
@@ -181,6 +188,37 @@ static void wait_hidden(PreviewHost *host, GtkWidget *popover)
         if (g_get_monotonic_time() > deadline) g_error("Hover preview did not hide.");
         poll_host(host);
     }
+}
+
+static void check_vertical_bounds(PreviewHost *host, GtkWidget *timeline,
+                                   GtkWidget *popover, double pending_fraction)
+{
+    /* Leave while a new target's refinement can still be pending. Neither
+     * late frames nor horizontal motion outside the bar may reopen it. */
+    hover(timeline, pending_fraction, FALSE);
+    pump_for(host, 80000);
+    hover_at(timeline, .75, -8, FALSE);
+    wait_hidden(host, popover);
+    pump_for(host, 250000);
+    g_assert_null(preview_texture(timeline));
+    hover_at(timeline, .25, -8, FALSE);
+    pump_for(host, 100000);
+    g_assert_false(gtk_widget_get_mapped(popover));
+    g_assert_null(preview_texture(timeline));
+    /* Motion back inside is sufficient even without a separate enter. */
+    hover(timeline, .75, FALSE);
+    wait_color(host, timeline, TRUE);
+    hover_at(timeline, .75, gtk_widget_get_height(timeline) + 8, FALSE);
+    wait_hidden(host, popover);
+    pump_for(host, 250000);
+    g_assert_null(preview_texture(timeline));
+    hover_at(timeline, .25, gtk_widget_get_height(timeline) + 8, FALSE);
+    pump_for(host, 100000);
+    g_assert_false(gtk_widget_get_mapped(popover));
+    g_assert_null(preview_texture(timeline));
+    hover(timeline, .25, FALSE);
+    wait_color(host, timeline, FALSE);
+    assert_playback_unchanged(host);
 }
 
 static void save_card(PreviewHost *host, GtkWidget *popover)
@@ -383,6 +421,7 @@ int main(void)
     g_assert_cmpuint(call_count(counter), ==, 0);
     GtkWidget *popover = find_widget(host.scale, GTK_TYPE_POPOVER);
     g_assert_nonnull(popover);
+    check_vertical_bounds(&host, host.scale, popover, .40);
     pump_for(&host, 100000);
     g_assert_true(card_allocated(host.scale));
     save_card(&host, popover);
@@ -393,6 +432,7 @@ int main(void)
     g_assert_false(gtk_widget_get_has_tooltip(host.custom));
     g_assert_true(find_widget(host.custom, GTK_TYPE_POPOVER) == popover);
     assert_playback_unchanged(&host);
+    check_vertical_bounds(&host, host.custom, popover, .90);
     seek_preview_set_enabled(host.preview, FALSE);
     wait_hidden(&host, popover);
     g_assert_true(gtk_widget_get_has_tooltip(host.custom));

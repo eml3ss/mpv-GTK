@@ -9,7 +9,49 @@
 #include <sys/stat.h>
 
 #define PREVIEW_CACHE_LIMIT 48
-#define PREVIEW_DEBOUNCE_MS 50
+#define PREVIEW_DEBOUNCE_MS 16
+
+typedef struct { GtkPopover parent; } PreviewPopover;
+typedef struct { GtkPopoverClass parent; } PreviewPopoverClass;
+
+G_DEFINE_TYPE(PreviewPopover, preview_popover, GTK_TYPE_POPOVER)
+
+static void preview_popover_pass_through(GtkWidget *widget)
+{
+    /* can-target only affects GTK picking. A popup still intercepts the
+     * Wayland pointer unless its native input region is empty. GtkPopover
+     * restores its input shape during every allocation, so clear it after
+     * the parent has allocated, including later moves and frame changes. */
+    GdkSurface *surface = gtk_native_get_surface(GTK_NATIVE(widget));
+    if (surface) {
+        cairo_region_t *empty = cairo_region_create();
+        gdk_surface_set_input_region(surface, empty);
+        cairo_region_destroy(empty);
+    }
+}
+
+static void preview_popover_realize(GtkWidget *widget)
+{
+    GTK_WIDGET_CLASS(preview_popover_parent_class)->realize(widget);
+    preview_popover_pass_through(widget);
+}
+
+static void preview_popover_size_allocate(GtkWidget *widget, int width, int height, int baseline)
+{
+    GTK_WIDGET_CLASS(preview_popover_parent_class)->size_allocate(widget, width, height, baseline);
+    preview_popover_pass_through(widget);
+}
+
+static void preview_popover_class_init(PreviewPopoverClass *klass)
+{
+    GTK_WIDGET_CLASS(klass)->realize = preview_popover_realize;
+    GTK_WIDGET_CLASS(klass)->size_allocate = preview_popover_size_allocate;
+}
+
+static void preview_popover_init(PreviewPopover *popover)
+{
+    (void)popover;
+}
 
 typedef struct {
     struct SeekPreview *owner;
@@ -247,6 +289,9 @@ static void check_source(SeekPreview *p)
     g_free(p->stream); p->stream = g_steal_pointer(&stream);
     p->offset = offset;
     p->local = TRUE;
+    char *hwdec = mpv_get_property_string(p->mpv, "hwdec-current");
+    preview_decoder_set_hardware(p->decoder, hwdec && g_str_has_prefix(hwdec, "nvdec"));
+    mpv_free(hwdec);
 }
 
 static GtkWidget *css_child(GtkWidget *parent, const char *name)
@@ -301,7 +346,7 @@ static char *timestamp(double seconds)
 static void create_popover(SeekPreview *p)
 {
     if (p->popover) return;
-    p->popover = g_object_ref_sink(gtk_popover_new());
+    p->popover = g_object_ref_sink(g_object_new(preview_popover_get_type(), NULL));
     gtk_popover_set_autohide(GTK_POPOVER(p->popover), FALSE);
     gtk_popover_set_has_arrow(GTK_POPOVER(p->popover), FALSE);
     gtk_popover_set_position(GTK_POPOVER(p->popover), GTK_POS_TOP);
@@ -361,7 +406,10 @@ static void show_card(SeekPreview *p, PreviewFrame *frame, gboolean loading)
     }
     GdkRectangle point = {.x = (int)CLAMP(p->pointer_x, 0, gtk_widget_get_width(anchor)), .y = 0,
         .width = 1, .height = MAX(1, gtk_widget_get_height(anchor))};
-    gtk_popover_set_pointing_to(GTK_POPOVER(p->popover), &point);
+    GdkRectangle previous;
+    if (!gtk_popover_get_pointing_to(GTK_POPOVER(p->popover), &previous) ||
+        !gdk_rectangle_equal(&point, &previous))
+        gtk_popover_set_pointing_to(GTK_POPOVER(p->popover), &point);
     g_autofree char *time = timestamp(p->seconds);
     gtk_label_set_text(GTK_LABEL(p->label), time);
     gtk_picture_set_paintable(GTK_PICTURE(p->picture), frame && frame->texture ? GDK_PAINTABLE(frame->texture) : NULL);
@@ -433,10 +481,15 @@ static gboolean debounce_finished(gpointer data)
 
 static void hover_motion(GtkEventControllerMotion *controller, double x, double y, gpointer data)
 {
-    (void)controller; (void)y;
+    (void)controller;
     PreviewAnchor *anchor = data;
     SeekPreview *p = anchor->owner;
     if (p->stopped || !p->enabled || !gtk_widget_get_mapped(anchor->widget)) return;
+    if (x < 0 || y < 0 || x >= gtk_widget_get_width(anchor->widget) ||
+        y >= gtk_widget_get_height(anchor->widget)) {
+        if (p->hover == anchor) seek_preview_hide(p);
+        return;
+    }
     if (p->hover != anchor) {
         seek_preview_hide(p);
         p->hover = anchor;

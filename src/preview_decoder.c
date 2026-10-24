@@ -9,6 +9,8 @@
 #define WARM_IDLE_US INT64_C(30000000)
 #define DECODE_TIMEOUT_US INT64_C(5000000)
 #define PIXEL_LIMIT (4 * 1024 * 1024)
+#define PREVIEW_WIDTH 160
+#define PREVIEW_HEIGHT 90
 
 typedef struct {
     char *key, *filename;
@@ -25,7 +27,7 @@ struct PreviewDecoder {
     GMainContext *context;
     PreviewDecoderCallback callback;
     gpointer data;
-    gboolean enabled, active, stopped, worker_started;
+    gboolean enabled, active, stopped, worker_started, nvdec;
     guint64 revision;
     gint64 last_activity;
     DecoderRequest wanted;
@@ -46,7 +48,8 @@ typedef struct {
     guint64 seen_revision, command_serial, load_id, seek_id;
     DecoderPhase phase;
     gboolean loaded, load_acknowledged, saw_start, file_ready;
-    gboolean seek_acknowledged, saw_seek, fast_delivered;
+    gboolean seek_acknowledged, saw_seek, nvdec;
+    double seek_seconds;
     gint64 deadline, refine_at;
 } DecoderWorker;
 
@@ -178,23 +181,24 @@ static gboolean flag(mpv_handle *core, const char *name, gboolean fallback)
     return mpv_get_property(core, name, MPV_FORMAT_FLAG, &value) >= 0 ? value != 0 : fallback;
 }
 
-static mpv_handle *create_core(char **error)
+static mpv_handle *create_core(gboolean nvdec, char **error)
 {
     mpv_handle *core = mpv_create();
     if (!core) { *error = g_strdup("Could not create the preview decoder."); return NULL; }
-    static const struct { const char *name, *value; gboolean optional; } options[] = {
+    const struct { const char *name, *value; gboolean optional; } options[] = {
         {"config", "no", FALSE}, {"terminal", "no", FALSE},
         {"input-terminal", "no", FALSE}, {"input-default-bindings", "no", FALSE},
         {"vo", "null", FALSE}, {"ao", "null", FALSE},
         {"audio", "no", FALSE}, {"sub", "no", FALSE},
         {"pause", "yes", FALSE}, {"idle", "yes", FALSE},
         {"keep-open", "always", FALSE}, {"force-window", "no", FALSE},
-        {"hwdec", "no", FALSE}, {"rebase-start-time", "no", FALSE},
+        {"hwdec", nvdec ? "nvdec-copy" : "no", FALSE},
+        {"rebase-start-time", "no", FALSE},
         {"hr-seek", "no", FALSE}, {"cache", "no", FALSE},
         {"demuxer-readahead-secs", "0", FALSE},
         {"demuxer-max-bytes", "128KiB", FALSE},
         {"demuxer-max-back-bytes", "128KiB", FALSE},
-        {"vd-lavc-threads", "2", FALSE}, {"vd-lavc-fast", "yes", FALSE},
+        {"vd-lavc-fast", "yes", FALSE},
         {"vd-lavc-skiploopfilter", "all", FALSE},
         {"sws-scaler", "fast-bilinear", FALSE},
         {"sws-allow-zimg", "no", TRUE},
@@ -204,7 +208,7 @@ static mpv_handle *create_core(char **error)
         {"load-select", "no", TRUE}, {"load-positioning", "no", TRUE},
         {"load-commands", "no", TRUE}, {"load-context-menu", "no", TRUE},
         {"resume-playback", "no", FALSE}, {"save-position-on-quit", "no", FALSE},
-        {"vf", "lavfi=[scale=w='max(2,trunc(min(256,144*dar)/2)*2)':h='max(2,trunc(min(144,256/dar)/2)*2)':flags=fast_bilinear,setsar=1,format=bgra]", FALSE}
+        {"vf", "lavfi=[scale=w='max(2,trunc(min(160,90*dar)/2)*2)':h='max(2,trunc(min(90,160/dar)/2)*2)':flags=fast_bilinear,setsar=1,format=bgra]", FALSE}
     };
     for (guint i = 0; i < G_N_ELEMENTS(options); ++i) {
         int status = mpv_set_option_string(core, options[i].name, options[i].value);
@@ -214,6 +218,10 @@ static mpv_handle *create_core(char **error)
             return NULL;
         }
     }
+    /* Several frame threads improve accurate-seek throughput for inter-frame
+     * codecs; keep preview work bounded instead of using every CPU. */
+    gint64 threads = CLAMP(g_get_num_processors(), 1, 8);
+    mpv_set_option(core, "vd-lavc-threads", MPV_FORMAT_INT64, &threads);
     int status = mpv_initialize(core);
     if (status < 0) {
         *error = g_strdup_printf("Could not initialize the preview decoder: %s", mpv_error_string(status));
@@ -238,8 +246,7 @@ static void close_core(DecoderWorker *worker)
 
 static void report_failure(DecoderWorker *worker, const char *message)
 {
-    if (!worker->fast_delivered)
-        post_frame(worker, NULL, 0, 0, worker->current.seconds, TRUE, message);
+    post_frame(worker, NULL, 0, 0, worker->current.seconds, TRUE, message);
     worker->phase = PHASE_DONE;
 }
 
@@ -256,6 +263,7 @@ static gboolean begin_seek(DecoderWorker *worker, gboolean exact)
         return FALSE;
     }
     worker->phase = exact ? PHASE_EXACT : PHASE_FAST;
+    worker->seek_seconds = seconds;
     worker->seek_acknowledged = FALSE;
     worker->saw_seek = FALSE;
     worker->deadline = g_get_monotonic_time() + DECODE_TIMEOUT_US;
@@ -295,6 +303,7 @@ static void load_movie(DecoderWorker *worker)
     g_free(worker->source_key);
     worker->source_key = g_strdup(worker->current.key);
     worker->source_index = worker->current.ff_index;
+    worker->seek_seconds = worker->current.seconds;
     mpv_set_property_string(worker->core, "hr-seek", "no");
     mpv_set_property_string(worker->core, "vid", "auto");
     char start[G_ASCII_DTOSTR_BUF_SIZE];
@@ -312,8 +321,8 @@ static GBytes *pack_pixels(const guchar *input, int width, int height, int strid
                             int *output_width, int *output_height)
 {
     /* mpv applies container rotation after the user filter. A bounded
-     * 256x144 landscape frame can therefore arrive as 144x256 here. */
-    double factor = MIN(1.0, MIN(256.0 / width, 144.0 / height));
+     * landscape frame can therefore arrive in portrait orientation here. */
+    double factor = MIN(1.0, MIN((double)PREVIEW_WIDTH / width, (double)PREVIEW_HEIGHT / height));
     int w = MAX(1, (int)floor(width * factor + .5));
     int h = MAX(1, (int)floor(height * factor + .5));
     gsize packed_stride = (gsize)w * 4;
@@ -365,7 +374,8 @@ static void capture_frame(DecoderWorker *worker, gboolean refined)
     gint64 width = integer_field(&result, "w", 0), height = integer_field(&result, "h", 0);
     gint64 stride = integer_field(&result, "stride", 0);
     const mpv_node *data = field(&result, "data");
-    gboolean valid = status >= 0 && width > 0 && width <= 256 && height > 0 && height <= 256 &&
+    gboolean valid = status >= 0 && width > 0 && width <= PREVIEW_WIDTH &&
+        height > 0 && height <= PREVIEW_WIDTH &&
         stride >= width * 4 && stride <= PIXEL_LIMIT &&
         g_strcmp0(text_field(&result, "format"), "bgra") == 0 &&
         data && data->format == MPV_FORMAT_BYTE_ARRAY && data->u.ba && data->u.ba->data &&
@@ -384,7 +394,6 @@ static void capture_frame(DecoderWorker *worker, gboolean refined)
     post_frame(worker, pixels, output_width, output_height,
         isfinite(actual) ? actual : worker->current.seconds, refined || already_exact, NULL);
     g_bytes_unref(pixels);
-    worker->fast_delivered = TRUE;
     if (refined || already_exact) worker->phase = PHASE_DONE;
     else {
         worker->phase = PHASE_REFINE_WAIT;
@@ -417,9 +426,17 @@ static void process_event(DecoderWorker *worker, const mpv_event *event)
         (worker->phase == PHASE_FAST || worker->phase == PHASE_EXACT) && worker->seek_acknowledged) {
         worker->saw_seek = TRUE;
     } else if (event->event_id == MPV_EVENT_PLAYBACK_RESTART) {
-        if (worker->phase == PHASE_LOADING && worker->file_ready) capture_frame(worker, FALSE);
-        else if (worker->saw_seek && (worker->phase == PHASE_FAST || worker->phase == PHASE_EXACT))
-            capture_frame(worker, worker->phase == PHASE_EXACT);
+        gboolean ready = (worker->phase == PHASE_LOADING && worker->file_ready) ||
+            (worker->saw_seek && (worker->phase == PHASE_FAST || worker->phase == PHASE_EXACT));
+        if (ready) {
+            gboolean refined = worker->phase == PHASE_EXACT;
+            worker->phase = PHASE_DONE;
+            /* Pointer updates do not restart an in-flight open/fast seek.
+             * Once it finishes, seek the latest target before publishing it. */
+            if (fabs(worker->seek_seconds - worker->current.seconds) >= .0005)
+                begin_seek(worker, FALSE);
+            else capture_frame(worker, refined);
+        }
     } else if (event->event_id == MPV_EVENT_END_FILE) {
         const mpv_event_end_file *end = event->data;
         if (end && end->reason == MPV_END_FILE_REASON_ERROR &&
@@ -443,6 +460,7 @@ static gboolean update_request(DecoderWorker *worker, gboolean *enabled, gboolea
     *enabled = decoder->enabled;
     *active = decoder->active;
     *last_activity = decoder->last_activity;
+    gboolean nvdec = decoder->nvdec;
     gboolean changed = decoder->revision != worker->seen_revision;
     if (changed) {
         worker->seen_revision = decoder->revision;
@@ -450,7 +468,10 @@ static gboolean update_request(DecoderWorker *worker, gboolean *enabled, gboolea
     }
     g_mutex_unlock(&decoder->mutex);
     if (!changed) return TRUE;
-    worker->fast_delivered = FALSE;
+    if (worker->nvdec != nvdec) {
+        close_core(worker);
+        worker->nvdec = nvdec;
+    }
     if (!*enabled) close_core(worker);
     if (!*active || !*enabled) {
         /* A fast seek can preempt an expensive accurate seek without closing
@@ -465,7 +486,7 @@ static gboolean update_request(DecoderWorker *worker, gboolean *enabled, gboolea
     }
     if (!worker->core) {
         g_autofree char *error = NULL;
-        worker->core = create_core(&error);
+        worker->core = create_core(worker->nvdec, &error);
         if (!worker->core) {
             report_failure(worker, error ? error : "Could not initialize the preview decoder.");
             return TRUE;
@@ -475,9 +496,11 @@ static gboolean update_request(DecoderWorker *worker, gboolean *enabled, gboolea
         g_mutex_unlock(&decoder->mutex);
         if (!current_request(worker)) return TRUE;
     }
-    if (worker->loaded && worker->source_index == worker->current.ff_index &&
-        g_strcmp0(worker->source_key, worker->current.key) == 0)
-        begin_seek(worker, FALSE);
+    gboolean same_source = worker->source_index == worker->current.ff_index &&
+        g_strcmp0(worker->source_key, worker->current.key) == 0;
+    if (same_source && (worker->phase == PHASE_LOADING || worker->phase == PHASE_FAST))
+        return TRUE;
+    if (worker->loaded && same_source) begin_seek(worker, FALSE);
     else load_movie(worker);
     return TRUE;
 }
@@ -567,6 +590,19 @@ void preview_decoder_cancel(PreviewDecoder *decoder)
         decoder->active = FALSE;
         decoder->wanted.revision = ++decoder->revision;
         decoder->last_activity = g_get_monotonic_time();
+        if (decoder->wake_core) mpv_wakeup(decoder->wake_core);
+        g_cond_signal(&decoder->condition);
+    }
+    g_mutex_unlock(&decoder->mutex);
+}
+
+void preview_decoder_set_hardware(PreviewDecoder *decoder, gboolean nvdec)
+{
+    if (!decoder) return;
+    g_mutex_lock(&decoder->mutex);
+    if (!decoder->stopped && decoder->nvdec != !!nvdec) {
+        decoder->nvdec = !!nvdec;
+        decoder->wanted.revision = ++decoder->revision;
         if (decoder->wake_core) mpv_wakeup(decoder->wake_core);
         g_cond_signal(&decoder->condition);
     }
