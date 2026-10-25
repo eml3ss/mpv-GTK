@@ -3,6 +3,9 @@
 ## Communication and documentation
 
 - Follow the user's language in conversation.
+- Keep progress commentary sparse. Do not narrate minor cosmetic changes or
+  routine edits, builds, and checks. Report only meaningful findings, important
+  changes, blockers, or decisions; keep the final result concise.
 - Write documentation, code comments, diagnostics, and commit messages in
   English. Preserve the player's localization and its test expectations.
 - Keep README.md short: purpose, main features, build/install instructions,

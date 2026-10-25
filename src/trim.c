@@ -375,6 +375,7 @@ static void create_audio_popup(GtkMenuButton *button, gpointer data)
     TrimMode *t = data;
     if (t->stopped || !t->available || t->busy || !t->audio_choices->len) return;
     t->audio_popover = gtk_popover_new();
+    gtk_widget_add_css_class(t->audio_popover, "trim-audio-popover");
     gtk_popover_set_position(GTK_POPOVER(t->audio_popover), GTK_POS_TOP);
     build_audio_menu(t);
     gtk_menu_button_set_popover(button, t->audio_popover);
@@ -619,10 +620,10 @@ static void build_controls(TrimMode *t)
     gtk_label_set_xalign(GTK_LABEL(t->length), 0);
     gtk_box_append(GTK_BOX(t->meta), t->length);
     t->audio_button = gtk_menu_button_new();
+    gtk_menu_button_set_has_frame(GTK_MENU_BUTTON(t->audio_button), FALSE);
     gtk_menu_button_set_direction(GTK_MENU_BUTTON(t->audio_button), GTK_ARROW_UP);
     gtk_menu_button_set_always_show_arrow(GTK_MENU_BUTTON(t->audio_button), FALSE);
     gtk_menu_button_set_create_popup_func(GTK_MENU_BUTTON(t->audio_button), create_audio_popup, t, NULL);
-    gtk_widget_add_css_class(t->audio_button, "compact-menu");
     gtk_widget_add_css_class(t->audio_button, "trim-audio-menu");
     GtkWidget *audio_icon = gtk_drawing_area_new();
     gtk_drawing_area_set_content_width(GTK_DRAWING_AREA(audio_icon), 24);

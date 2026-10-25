@@ -36,7 +36,7 @@
 #include "seek_preview.h"
 
 #define APP_ID "io.github.emless.mpvgtk"
-#define APP_VERSION "0.20.0"
+#define APP_VERSION "0.20.1"
 #define APP_ICON_NAME APP_ID
 #define HWDEC_REFRESH_ID UINT64_C(10001)
 #define HWDEC_SET_ID UINT64_C(10002)
@@ -4170,7 +4170,6 @@ static void activate(GtkApplication *application, gpointer data)
         ".compact-menu > button { background: transparent; padding: 4px 8px;"
         "font-weight: 600; font-variant-numeric: tabular-nums; }"
         ".compact-menu > button:hover { background: alpha(@window_fg_color,.08); }"
-        ".trim-audio-menu > button { padding: 4px; }"
         ".active-track > button { color: @accent_color; background: alpha(@accent_bg_color,.12); }"
         ".timecode { font-variant-numeric: tabular-nums; font-family: 'Adwaita Sans', sans-serif; }"
         ".controls button.trim-active { color: @accent_color; background: alpha(@accent_bg_color,.14); }"
@@ -4214,6 +4213,13 @@ static void activate(GtkApplication *application, gpointer data)
         ".controls .compact-menu > button:hover { background: alpha(@window_fg_color,.10); }"
         ".controls .compact-menu.active-track > button { color: @accent_color;"
         "background: alpha(@accent_bg_color,.12); }"
+        ".controls .trim-audio-menu > button, .controls .trim-audio-menu > button:checked {"
+        "min-width: 24px; min-height: 24px; padding: 4px; border-radius: 9px;"
+        "background: transparent; background-image: none; border: none; box-shadow: none; outline: none; }"
+        ".controls .trim-audio-menu > button:hover, .controls .trim-audio-menu > button:focus-visible {"
+        "background: alpha(@window_fg_color,.08); }"
+        ".controls .trim-audio-menu > button:active { background: alpha(@window_fg_color,.14); }"
+        "popover.trim-audio-popover { margin: 8px; }"
         ".controls .chapter-menu > button, .controls .chapter-menu > button:checked {"
         "background: transparent; box-shadow: none; color: @window_fg_color;"
         "border-color: transparent; padding: 4px; min-width: 24px; min-height: 24px; border-radius: 8px; }"
