@@ -21,6 +21,7 @@ original script. Repeated edits continue smoothly from the current drawing.
 | Set end at current position | Right boundary button / O |
 | Previous / next keyframe | Key buttons / `[` and `]` |
 | Play / pause | Center playback button / Space |
+| Choose exported audio tracks | Audio selection button beside the export buttons |
 | Export a copy, keeping the original | Copy export button / Ctrl+E |
 | Export and replace the original | Replace export button / Ctrl+Shift+E |
 
@@ -42,7 +43,18 @@ holds the controls while the interaction is active.
 
 FFmpeg and ffprobe are required. Exports support local video files and use
 FFmpeg stream copy, subject to the original codec/keyframe cutting behavior.
-They keep the original extension, streams, metadata, and chapter mapping.
+They keep the original extension, metadata, chapter mapping, and source streams
+except audio tracks explicitly excluded from export.
+
+The audio selection button opens a compact menu above it, with checkboxes for
+the source file's audio tracks, with titles, language, and codec when available.
+All tracks are included initially. Select any subset, use **All** to restore
+them, or choose
+**No audio** for a silent result. The button uses the theme accent when the
+selection differs from all tracks. This does not change the audio being played.
+The selection applies to both export buttons and their shortcuts, is frozen
+when export starts, and resets to all tracks when a different file loads.
+External audio files attached to playback are not part of the source export.
 
 Copy export saves beside the source with the selected times in its name;
 existing files are never overwritten. Replacement export writes and checks a
@@ -65,7 +77,7 @@ The system mpv plugin and configuration are unchanged.
 
 The focused integration check, `make test-trim`, uses generated media and an
 isolated configuration to exercise activation, keyframes, boundary validation,
-copy/replacement export, reopening, and shutdown with all Lua scripts disabled.
+selected/all/silent audio exports, reopening, and shutdown with all Lua scripts disabled.
 It also checks filename collisions, tool failures, concurrent source changes,
 and cancellation during export. Its native check deliberately fails opening a
 replacement and verifies that rollback restores the original bytes, permissions,

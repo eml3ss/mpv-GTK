@@ -11,7 +11,15 @@
 #define TRIM_SELECTION_DURATION_US INT64_C(200000)
 
 typedef enum { SCISSORS, KEY_PREVIOUS, KEY_NEXT, SET_START, SET_END,
-               EXPORT_COPY, EXPORT_REPLACE } TrimGlyph;
+               EXPORT_COPY, EXPORT_REPLACE, AUDIO_TRACKS } TrimGlyph;
+
+typedef struct {
+    TrimMode *owner;
+    gint64 id, ff_index, file_serial;
+    char *title, *lang, *codec;
+    gboolean included;
+    GtkWidget *check;
+} TrimAudioChoice;
 
 struct TrimMode {
     TrimHost host;
@@ -19,6 +27,10 @@ struct TrimMode {
     char *config_path;
     GtkWidget *button, *meta, *canvas, *group, *entries[2], *keys[2];
     GtkWidget *play_icon, *exports[2], *progress, *progress_label, *length;
+    GtkWidget *audio_button, *audio_popover;
+    GPtrArray *audio_choices;
+    gint64 audio_file_serial;
+    gboolean audio_updating;
     GArray *keyframes;
     cairo_path_t *marks;
     int marks_width, marks_height;
@@ -117,6 +129,13 @@ static void glyph_draw(GtkDrawingArea *area, cairo_t *cr, int width, int height,
         cairo_move_to(cr, 6, 4); cairo_line_to(cr, 6, 20);
         cairo_move_to(cr, 20, 12); cairo_line_to(cr, 10, 12);
         cairo_move_to(cr, 14, 8); cairo_line_to(cr, 10, 12); cairo_line_to(cr, 14, 16);
+        cairo_stroke(cr);
+    } else if (glyph == AUDIO_TRACKS) {
+        cairo_move_to(cr, 3, 8); cairo_line_to(cr, 3, 16);
+        cairo_move_to(cr, 7, 5); cairo_line_to(cr, 7, 19);
+        cairo_move_to(cr, 11, 8); cairo_line_to(cr, 11, 16);
+        cairo_move_to(cr, 15, 4); cairo_line_to(cr, 15, 11);
+        cairo_move_to(cr, 15, 17); cairo_line_to(cr, 18, 20); cairo_line_to(cr, 23, 14);
         cairo_stroke(cr);
     } else {
         cairo_rectangle(cr, 2.5, 4, 19, 16); cairo_stroke(cr);
@@ -228,6 +247,177 @@ static GtkWidget *action_button(TrimMode *t, TrimGlyph glyph, const char *toolti
     g_object_set_data(G_OBJECT(button), "trim-argument", (gpointer)argument);
     g_signal_connect(button, "clicked", G_CALLBACK(action_clicked), t);
     return button;
+}
+
+static void audio_choice_free(gpointer data)
+{
+    TrimAudioChoice *choice = data;
+    g_free(choice->title); g_free(choice->lang); g_free(choice->codec);
+    g_free(choice);
+}
+
+static void clear_audio_menu(TrimMode *t)
+{
+    for (guint i = 0; i < t->audio_choices->len; ++i) {
+        TrimAudioChoice *choice = g_ptr_array_index(t->audio_choices, i);
+        if (choice->check) g_signal_handlers_disconnect_by_data(choice->check, choice);
+        choice->check = NULL;
+    }
+    if (t->audio_popover) gtk_popover_set_child(GTK_POPOVER(t->audio_popover), NULL);
+}
+
+static void update_audio_button(TrimMode *t)
+{
+    if (!t->audio_button) return;
+    guint selected = 0;
+    for (guint i = 0; i < t->audio_choices->len; ++i)
+        selected += ((TrimAudioChoice *)g_ptr_array_index(t->audio_choices, i))->included;
+    g_autofree char *tooltip = t->audio_choices->len
+        ? g_strdup_printf("%s · %u/%u", tr("Аудиодорожки для экспорта"), selected, t->audio_choices->len)
+        : g_strdup(tr("В файле нет аудиодорожек для экспорта."));
+    gtk_widget_set_tooltip_text(t->audio_button, tooltip);
+    gtk_accessible_update_property(GTK_ACCESSIBLE(t->audio_button),
+                                  GTK_ACCESSIBLE_PROPERTY_LABEL, tooltip, -1);
+    if (selected < t->audio_choices->len) gtk_widget_add_css_class(t->audio_button, "active-track");
+    else gtk_widget_remove_css_class(t->audio_button, "active-track");
+}
+
+static void audio_choice_toggled(GtkCheckButton *check, gpointer data)
+{
+    TrimAudioChoice *choice = data;
+    TrimMode *t = choice->owner;
+    if (t->stopped || t->audio_updating || t->busy || !t->available) return;
+    g_autofree char *index = g_strdup_printf("%" G_GINT64_FORMAT, choice->ff_index);
+    g_autofree char *serial = g_strdup_printf("%" G_GINT64_FORMAT, choice->file_serial);
+    const char *args[] = {index, gtk_check_button_get_active(check) ? "yes" : "no", serial};
+    trim_backend_action(t->backend, "set-audio", G_N_ELEMENTS(args), args);
+}
+
+static void audio_all_clicked(GtkButton *button, gpointer data)
+{
+    TrimMode *t = data;
+    if (t->stopped || t->busy || !t->available) return;
+    const char *args[] = {g_object_get_data(G_OBJECT(button), "trim-audio-all"),
+                         g_object_get_data(G_OBJECT(button), "trim-audio-serial")};
+    trim_backend_action(t->backend, "audio-all", G_N_ELEMENTS(args), args);
+}
+
+static GtkWidget *audio_label(const char *key)
+{
+    GtkWidget *label = gtk_label_new(tr(key));
+    g_object_set_data(G_OBJECT(label), "mpv-label-key", (gpointer)key);
+    gtk_label_set_xalign(GTK_LABEL(label), 0);
+    return label;
+}
+
+static void build_audio_menu(TrimMode *t)
+{
+    if (!t->audio_popover) return;
+    clear_audio_menu(t);
+    GtkWidget *body = gtk_box_new(GTK_ORIENTATION_VERTICAL, 4);
+    gtk_widget_set_margin_start(body, 6); gtk_widget_set_margin_end(body, 6);
+    gtk_widget_set_margin_top(body, 6); gtk_widget_set_margin_bottom(body, 6);
+    gtk_widget_set_size_request(body, 260, -1);
+    GtkWidget *actions = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
+    GtkWidget *heading = audio_label("Аудиодорожки");
+    gtk_widget_add_css_class(heading, "heading");
+    gtk_widget_set_hexpand(heading, TRUE);
+    gtk_box_append(GTK_BOX(actions), heading);
+    const char *labels[] = {"Все", "Без звука"};
+    for (int i = 0; i < 2; ++i) {
+        GtkWidget *button = gtk_button_new_with_label(tr(labels[i]));
+        g_object_set_data(G_OBJECT(button), "mpv-label-key", (gpointer)labels[i]);
+        g_object_set_data(G_OBJECT(button), "trim-audio-all", i ? "no" : "yes");
+        g_object_set_data_full(G_OBJECT(button), "trim-audio-serial",
+            g_strdup_printf("%" G_GINT64_FORMAT, t->audio_file_serial), g_free);
+        gtk_widget_add_css_class(button, "flat");
+        gtk_widget_add_css_class(button, "control-button");
+        g_signal_connect(button, "clicked", G_CALLBACK(audio_all_clicked), t);
+        gtk_box_append(GTK_BOX(actions), button);
+    }
+    gtk_box_append(GTK_BOX(body), actions);
+    GtkWidget *scroll = gtk_scrolled_window_new();
+    gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scroll), GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
+    gtk_scrolled_window_set_propagate_natural_height(GTK_SCROLLED_WINDOW(scroll), TRUE);
+    gtk_scrolled_window_set_max_content_height(GTK_SCROLLED_WINDOW(scroll), 240);
+    GtkWidget *list = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+    gtk_widget_set_margin_end(list, 6);
+    for (guint i = 0; i < t->audio_choices->len; ++i) {
+        TrimAudioChoice *choice = g_ptr_array_index(t->audio_choices, i);
+        choice->check = gtk_check_button_new();
+        g_autofree char *title = g_strdup_printf("%" G_GINT64_FORMAT " · %s", choice->id,
+            *choice->title ? choice->title : tr("Дорожка"));
+        g_autofree char *details = g_strdup_printf("%s%s%s", choice->lang,
+            *choice->lang && *choice->codec ? " · " : "", choice->codec);
+        g_autofree char *full_title = g_strdup_printf("%s%s%s", title, *details ? " · " : "", details);
+        GtkWidget *row = gtk_label_new(full_title);
+        gtk_label_set_xalign(GTK_LABEL(row), 0);
+        gtk_label_set_ellipsize(GTK_LABEL(row), PANGO_ELLIPSIZE_END);
+        gtk_label_set_max_width_chars(GTK_LABEL(row), 38);
+        gtk_widget_set_margin_start(row, 4);
+        gtk_widget_set_margin_top(row, 2); gtk_widget_set_margin_bottom(row, 2);
+        gtk_widget_set_can_target(row, FALSE);
+        gtk_check_button_set_child(GTK_CHECK_BUTTON(choice->check), row);
+        gtk_check_button_set_active(GTK_CHECK_BUTTON(choice->check), choice->included);
+        gtk_widget_set_tooltip_text(choice->check, full_title);
+        gtk_accessible_update_property(GTK_ACCESSIBLE(choice->check),
+                                      GTK_ACCESSIBLE_PROPERTY_LABEL, full_title, -1);
+        g_signal_connect(choice->check, "toggled", G_CALLBACK(audio_choice_toggled), choice);
+        gtk_box_append(GTK_BOX(list), choice->check);
+    }
+    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scroll), list);
+    gtk_box_append(GTK_BOX(body), scroll);
+    gtk_popover_set_child(GTK_POPOVER(t->audio_popover), body);
+}
+
+static void create_audio_popup(GtkMenuButton *button, gpointer data)
+{
+    TrimMode *t = data;
+    if (t->stopped || !t->available || t->busy || !t->audio_choices->len) return;
+    t->audio_popover = gtk_popover_new();
+    gtk_popover_set_position(GTK_POPOVER(t->audio_popover), GTK_POS_TOP);
+    build_audio_menu(t);
+    gtk_menu_button_set_popover(button, t->audio_popover);
+}
+
+static void update_audio_choices(TrimMode *t, const mpv_node *node)
+{
+    const mpv_node *tracks = field(node, "tracks");
+    if (!tracks || tracks->format != MPV_FORMAT_NODE_ARRAY || !tracks->u.list) return;
+    gint64 serial = number_field(node, "file_serial");
+    gboolean changed = serial != t->audio_file_serial || tracks->u.list->num != (int)t->audio_choices->len;
+    for (int i = 0; !changed && i < tracks->u.list->num; ++i) {
+        const mpv_node *row = &tracks->u.list->values[i];
+        TrimAudioChoice *choice = g_ptr_array_index(t->audio_choices, i);
+        changed = choice->id != number_field(row, "id") || choice->ff_index != number_field(row, "ff_index") ||
+            g_strcmp0(choice->title, text_field(row, "title")) || g_strcmp0(choice->lang, text_field(row, "lang")) ||
+            g_strcmp0(choice->codec, text_field(row, "codec"));
+    }
+    if (changed) {
+        if (t->audio_button) gtk_menu_button_popdown(GTK_MENU_BUTTON(t->audio_button));
+        clear_audio_menu(t);
+        g_ptr_array_set_size(t->audio_choices, 0);
+        t->audio_file_serial = serial;
+        for (int i = 0; i < tracks->u.list->num; ++i) {
+            const mpv_node *row = &tracks->u.list->values[i];
+            TrimAudioChoice *choice = g_new0(TrimAudioChoice, 1);
+            *choice = (TrimAudioChoice){.owner = t, .file_serial = serial,
+                .id = number_field(row, "id"), .ff_index = number_field(row, "ff_index"),
+                .title = g_strdup(text_field(row, "title")), .lang = g_strdup(text_field(row, "lang")),
+                .codec = g_strdup(text_field(row, "codec")), .included = flag_field(row, "included")};
+            g_ptr_array_add(t->audio_choices, choice);
+        }
+        if (t->audio_popover) build_audio_menu(t);
+    } else {
+        t->audio_updating = TRUE;
+        for (int i = 0; i < tracks->u.list->num; ++i) {
+            TrimAudioChoice *choice = g_ptr_array_index(t->audio_choices, i);
+            choice->included = flag_field(&tracks->u.list->values[i], "included");
+            if (choice->check) gtk_check_button_set_active(GTK_CHECK_BUTTON(choice->check), choice->included);
+        }
+        t->audio_updating = FALSE;
+    }
+    update_audio_button(t);
 }
 
 static void rounded(cairo_t *cr, double x, double y, double width, double height, double r)
@@ -428,6 +618,20 @@ static void build_controls(TrimMode *t)
     gtk_widget_set_hexpand(t->length, TRUE);
     gtk_label_set_xalign(GTK_LABEL(t->length), 0);
     gtk_box_append(GTK_BOX(t->meta), t->length);
+    t->audio_button = gtk_menu_button_new();
+    gtk_menu_button_set_direction(GTK_MENU_BUTTON(t->audio_button), GTK_ARROW_UP);
+    gtk_menu_button_set_always_show_arrow(GTK_MENU_BUTTON(t->audio_button), FALSE);
+    gtk_menu_button_set_create_popup_func(GTK_MENU_BUTTON(t->audio_button), create_audio_popup, t, NULL);
+    gtk_widget_add_css_class(t->audio_button, "compact-menu");
+    gtk_widget_add_css_class(t->audio_button, "trim-audio-menu");
+    GtkWidget *audio_icon = gtk_drawing_area_new();
+    gtk_drawing_area_set_content_width(GTK_DRAWING_AREA(audio_icon), 24);
+    gtk_drawing_area_set_content_height(GTK_DRAWING_AREA(audio_icon), 24);
+    gtk_drawing_area_set_draw_func(GTK_DRAWING_AREA(audio_icon), glyph_draw, GINT_TO_POINTER(AUDIO_TRACKS), NULL);
+    gtk_widget_set_can_target(audio_icon, FALSE);
+    gtk_menu_button_set_child(GTK_MENU_BUTTON(t->audio_button), audio_icon);
+    update_audio_button(t);
+    gtk_box_append(GTK_BOX(t->meta), t->audio_button);
     t->exports[0] = action_button(t, EXPORT_REPLACE, "Экспортировать с заменой оригинала · Ctrl+Shift+E", "export", "replace");
     t->exports[1] = action_button(t, EXPORT_COPY, "Экспортировать копию · Ctrl+E", "export", "keep");
     gtk_box_append(GTK_BOX(t->meta), t->exports[0]);
@@ -520,6 +724,9 @@ static void update_sensitivity(TrimMode *t)
     if (!t->meta) return;
     gtk_widget_set_sensitive(t->group, t->available && !t->busy);
     gtk_widget_set_sensitive(t->canvas, t->available && !t->busy);
+    gtk_widget_set_sensitive(t->audio_button, t->available && !t->busy && t->audio_choices->len > 0);
+    if (!t->available || t->busy || !t->audio_choices->len)
+        gtk_menu_button_popdown(GTK_MENU_BUTTON(t->audio_button));
     for (int i = 0; i < 2; ++i) {
         gtk_widget_set_sensitive(t->exports[i], t->available && !t->busy);
         gtk_widget_set_sensitive(t->keys[i], t->keyframes->len > 0);
@@ -531,6 +738,7 @@ static void set_active(TrimMode *t, gboolean active)
     if (active) build_controls(t);
     t->active = active;
     if (!active) {
+        if (t->audio_button) gtk_menu_button_popdown(GTK_MENU_BUTTON(t->audio_button));
         t->dragging = FALSE;
         t->selection_animated = FALSE;
         if (t->seek_source) { g_source_remove(t->seek_source); t->seek_source = 0; }
@@ -555,7 +763,7 @@ static void load_backend(TrimMode *t)
     if (t->stopped || t->backend) return;
     static const char *properties[] = {
         "user-data/trim-mode", "user-data/trim-controls",
-        "user-data/trim-export", "user-data/trim-field-result"
+        "user-data/trim-export", "user-data/trim-field-result", "user-data/trim-audio"
     };
     for (guint i = 0; i < G_N_ELEMENTS(properties); ++i)
         mpv_observe_property(t->host.mpv, TRIM_OBSERVE_BASE + i, properties[i], MPV_FORMAT_NODE);
@@ -581,6 +789,8 @@ TrimMode *trim_mode_new(const TrimHost *host)
     t->frame = -1;
     t->config_path = g_strdup(host->config_path);
     t->keyframes = g_array_new(FALSE, FALSE, sizeof(double));
+    t->audio_choices = g_ptr_array_new_with_free_func(audio_choice_free);
+    t->audio_file_serial = -1;
     t->button = g_object_ref_sink(glyph_button(SCISSORS, "Режим обрезки · Ctrl+T"));
     gtk_actionable_set_action_name(GTK_ACTIONABLE(t->button), "app.trim");
     g_autofree char *directory = g_path_get_dirname(t->config_path);
@@ -594,6 +804,11 @@ TrimMode *trim_mode_new(const TrimHost *host)
 
 GtkWidget *trim_mode_button(TrimMode *t) { return t ? t->button : NULL; }
 gboolean trim_mode_active(const TrimMode *t) { return t && t->active; }
+gboolean trim_mode_audio_menu_open(const TrimMode *t)
+{
+    return t && !t->stopped && t->active && t->audio_button &&
+        gtk_menu_button_get_active(GTK_MENU_BUTTON(t->audio_button));
+}
 
 void trim_mode_toggle(TrimMode *t)
 {
@@ -615,6 +830,7 @@ gboolean trim_mode_holding(const TrimMode *t)
 {
     if (!t || t->stopped) return FALSE;
     if (t->dragging) return TRUE;
+    if (trim_mode_audio_menu_open(t)) return TRUE;
     if (!t->active || !t->group) return FALSE;
     GtkWidget *focus = gtk_window_get_focus(t->host.window);
     return focus && (focus == t->group || gtk_widget_is_ancestor(focus, t->group));
@@ -647,6 +863,8 @@ void trim_mode_position(TrimMode *t, double seconds, gboolean paused)
 void trim_mode_translate(TrimMode *t)
 {
     if (!t) return;
+    if (t->audio_popover) build_audio_menu(t);
+    update_audio_button(t);
     GtkWidget *roots[] = {t->button, t->meta, t->canvas, t->group};
     GQueue queue = G_QUEUE_INIT;
     for (guint i = 0; i < G_N_ELEMENTS(roots); ++i) if (roots[i]) g_queue_push_tail(&queue, roots[i]);
@@ -657,6 +875,9 @@ void trim_mode_translate(TrimMode *t)
             gtk_widget_set_tooltip_text(widget, tr(key));
             gtk_accessible_update_property(GTK_ACCESSIBLE(widget), GTK_ACCESSIBLE_PROPERTY_LABEL, tr(key), -1);
         }
+        key = g_object_get_data(G_OBJECT(widget), "mpv-label-key");
+        if (key && GTK_IS_LABEL(widget)) gtk_label_set_text(GTK_LABEL(widget), tr(key));
+        else if (key && GTK_IS_BUTTON(widget)) gtk_button_set_label(GTK_BUTTON(widget), tr(key));
         for (GtkWidget *child = gtk_widget_get_first_child(widget); child; child = gtk_widget_get_next_sibling(child))
             g_queue_push_tail(&queue, child);
     }
@@ -685,7 +906,7 @@ gboolean trim_mode_handle_event(TrimMode *t, const mpv_event *event)
         return FALSE;
     }
     if (event->event_id != MPV_EVENT_PROPERTY_CHANGE || event->reply_userdata < TRIM_OBSERVE_BASE ||
-        event->reply_userdata > TRIM_OBSERVE_BASE + 3) return FALSE;
+        event->reply_userdata > TRIM_OBSERVE_BASE + 4) return FALSE;
     const mpv_event_property *property = event->data;
     if (!property || !property->data) return TRUE;
     if (property->format != MPV_FORMAT_NODE) return TRUE;
@@ -743,7 +964,7 @@ gboolean trim_mode_handle_event(TrimMode *t, const mpv_event *event)
                     *text_field(node, "backup") ? "\n" : "", text_field(node, "backup"));
             t->host.message(message, !success, t->host.data);
         }
-    } else {
+    } else if (event->reply_userdata == TRIM_OBSERVE_BASE + 3) {
         int side = g_strcmp0(text_field(node, "boundary"), "end") == 0;
         guint64 serial = g_ascii_strtoull(text_field(node, "serial"), NULL, 10);
         if (t->meta && serial == t->entry_serial[side]) {
@@ -759,7 +980,7 @@ gboolean trim_mode_handle_event(TrimMode *t, const mpv_event *event)
                 } else gtk_widget_add_css_class(entry, "error");
             }
         }
-    }
+    } else update_audio_choices(t, node);
     update_sensitivity(t);
     if (t->canvas) gtk_widget_queue_draw(t->canvas);
     return TRUE;
@@ -768,6 +989,7 @@ gboolean trim_mode_handle_event(TrimMode *t, const mpv_event *event)
 void trim_mode_shutdown(TrimMode *t)
 {
     if (!t || t->stopped) return;
+    if (t->audio_button) gtk_menu_button_popdown(GTK_MENU_BUTTON(t->audio_button));
     t->stopped = TRUE;
     t->selection_animated = FALSE;
     trim_backend_shutdown(t->backend);
@@ -780,6 +1002,7 @@ void trim_mode_free(TrimMode *t)
     if (!t) return;
     trim_mode_shutdown(t);
     trim_backend_free(t->backend);
+    clear_audio_menu(t);
     /* A forced application quit can leave windows alive until app disposal.
      * Detach our owned roots before freeing callbacks' shared state. */
     GtkWidget *roots[] = {t->meta, t->canvas, t->group, t->progress, t->button};
@@ -795,6 +1018,7 @@ void trim_mode_free(TrimMode *t)
     g_clear_object(&t->progress);
     g_clear_object(&t->button);
     g_array_unref(t->keyframes);
+    g_ptr_array_unref(t->audio_choices);
     if (t->marks) cairo_path_destroy(t->marks);
     g_free(t->submitted[0]); g_free(t->submitted[1]);
     g_free(t->config_path); g_free(t->phase);

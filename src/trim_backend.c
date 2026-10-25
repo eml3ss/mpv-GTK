@@ -26,6 +26,12 @@ typedef struct {
     GArray *times;
 } KeyframeCache;
 
+typedef struct {
+    gint64 id, ff_index;
+    char *title, *lang, *codec;
+    gboolean included;
+} AudioTrack;
+
 struct TrimBackend {
     gint references;
     mpv_handle *mpv, *compat;
@@ -35,9 +41,10 @@ struct TrimBackend {
     gboolean stopped, enabled, ever_enabled, loaded, video_available;
     gboolean gtk_editing, shortcuts_active, follows_duration;
     gboolean remember, open_copy, open_replace;
-    char *ffmpeg_path, *ffprobe_path, *state_path;
+    char *ffmpeg_path, *ffprobe_path, *state_path, *audio_source;
     gint64 start_ms, end_ms, duration_ms, file_serial;
     GArray *keyframes;
+    GPtrArray *audio_tracks;
     GQueue cache;
     char *cached_file, *scan_key;
     guint64 scan_serial, scan_request;
@@ -55,6 +62,7 @@ static void publish_controls(TrimBackend *b);
 static void scan_keyframes(TrimBackend *b);
 static void update_shortcuts(TrimBackend *b);
 static void backend_unref(TrimBackend *b);
+static void publish_audio(TrimBackend *b);
 
 static const mpv_node *map_field(const mpv_node *map, const char *key)
 {
@@ -161,6 +169,123 @@ static void publish_controls(TrimBackend *b)
     mpv_node values[] = {node_flag(available(b)), node_integer(b->start_ms), node_integer(b->end_ms),
         node_integer(b->duration_ms), node_integer(b->file_serial), node_text(first), node_text(last)};
     publish_map(b, "user-data/trim-controls", G_N_ELEMENTS(keys), keys, values);
+}
+
+static void audio_track_free(gpointer data)
+{
+    AudioTrack *track = data;
+    g_free(track->title); g_free(track->lang); g_free(track->codec); g_free(track);
+}
+
+static AudioTrack *audio_track_at(TrimBackend *b, gint64 index)
+{
+    for (guint i = 0; i < b->audio_tracks->len; ++i) {
+        AudioTrack *track = g_ptr_array_index(b->audio_tracks, i);
+        if (track->ff_index == index) return track;
+    }
+    return NULL;
+}
+
+static void publish_audio(TrimBackend *b)
+{
+    guint count = b->audio_tracks->len, selected = 0;
+    char *track_keys[] = {"id", "ff_index", "title", "lang", "codec", "included"};
+    g_autofree mpv_node *tracks = g_new0(mpv_node, count);
+    g_autofree mpv_node_list *maps = g_new0(mpv_node_list, count);
+    g_autofree mpv_node *fields = g_new0(mpv_node, (gsize)count * G_N_ELEMENTS(track_keys));
+    for (guint i = 0; i < count; ++i) {
+        AudioTrack *track = g_ptr_array_index(b->audio_tracks, i);
+        mpv_node *values = fields + (gsize)i * G_N_ELEMENTS(track_keys);
+        values[0] = node_integer(track->id);
+        values[1] = node_integer(track->ff_index);
+        values[2] = node_text(track->title);
+        values[3] = node_text(track->lang);
+        values[4] = node_text(track->codec);
+        values[5] = node_flag(track->included);
+        selected += track->included;
+        maps[i] = (mpv_node_list){.num = G_N_ELEMENTS(track_keys), .keys = track_keys, .values = values};
+        tracks[i] = (mpv_node){.format = MPV_FORMAT_NODE_MAP, .u.list = &maps[i]};
+    }
+    mpv_node_list list = {.num = (int)count, .values = tracks};
+    char *keys[] = {"file_serial", "tracks", "selected_count", "total_count"};
+    mpv_node values[] = {node_integer(b->file_serial),
+        {.format = MPV_FORMAT_NODE_ARRAY, .u.list = &list}, node_integer(selected), node_integer(count)};
+    publish_map(b, "user-data/trim-audio", G_N_ELEMENTS(keys), keys, values);
+}
+
+static gboolean refresh_audio(TrimBackend *b)
+{
+    if (!b->loaded) return FALSE;
+    char *path = mpv_get_property_string(b->mpv, "path");
+    if (!path || !*path || (b->audio_source && g_strcmp0(path, b->audio_source) != 0)) {
+        mpv_free(path);
+        return FALSE;
+    }
+    mpv_node tracks = {0};
+    if (mpv_get_property(b->mpv, "track-list", MPV_FORMAT_NODE, &tracks) < 0 ||
+        tracks.format != MPV_FORMAT_NODE_ARRAY || !tracks.u.list) {
+        mpv_free_node_contents(&tracks);
+        mpv_free(path);
+        return FALSE;
+    }
+    char *current = mpv_get_property_string(b->mpv, "path");
+    gboolean same_source = g_strcmp0(path, current) == 0;
+    mpv_free(current);
+    if (!same_source) { mpv_free(path); mpv_free_node_contents(&tracks); return FALSE; }
+    GPtrArray *next = g_ptr_array_new_with_free_func(audio_track_free);
+    for (int i = 0; i < tracks.u.list->num; ++i) {
+        const mpv_node *value = &tracks.u.list->values[i];
+        gint64 index = map_integer(value, "ff-index");
+        if (g_strcmp0(map_text(value, "type"), "audio") != 0 || index < 0 ||
+            map_flag(value, "external") || *map_text(value, "external-filename")) continue;
+        gboolean duplicate = FALSE;
+        for (guint n = 0; n < next->len; ++n)
+            if (((AudioTrack *)g_ptr_array_index(next, n))->ff_index == index) { duplicate = TRUE; break; }
+        if (duplicate) continue;
+        AudioTrack *previous = audio_track_at(b, index);
+        AudioTrack *track = g_new0(AudioTrack, 1);
+        *track = (AudioTrack){.id = map_integer(value, "id"), .ff_index = index,
+            .title = g_strdup(map_text(value, "title")), .lang = g_strdup(map_text(value, "lang")),
+            .codec = g_strdup(map_text(value, "codec")), .included = previous ? previous->included : TRUE};
+        g_ptr_array_add(next, track);
+    }
+    mpv_free_node_contents(&tracks);
+    if (!b->audio_source) b->audio_source = g_strdup(path);
+    mpv_free(path);
+    g_ptr_array_unref(b->audio_tracks);
+    b->audio_tracks = next;
+    publish_audio(b);
+    return TRUE;
+}
+
+static gboolean audio_argument_integer(const char *text, gint64 *value)
+{
+    if (!text || !*text) return FALSE;
+    for (const char *p = text; *p; ++p) if (!g_ascii_isdigit(*p)) return FALSE;
+    errno = 0;
+    *value = g_ascii_strtoll(text, NULL, 10);
+    return errno != ERANGE && *value >= 0;
+}
+
+static void select_audio(TrimBackend *b, gboolean all, int argc, const char *const *argv)
+{
+    if (!b->enabled || !available(b) || trim_export_busy(b->exporter) || !argv ||
+        argc != (all ? 2 : 3)) return;
+    const char *state = argv[all ? 0 : 1];
+    gint64 serial, index = -1;
+    if (!state || (!g_str_equal(state, "yes") && !g_str_equal(state, "no")) ||
+        !audio_argument_integer(argv[all ? 1 : 2], &serial) || serial != b->file_serial ||
+        (!all && !audio_argument_integer(argv[0], &index)) || !refresh_audio(b)) return;
+    gboolean included = g_str_equal(state, "yes");
+    if (all) {
+        for (guint i = 0; i < b->audio_tracks->len; ++i)
+            ((AudioTrack *)g_ptr_array_index(b->audio_tracks, i))->included = included;
+    } else {
+        AudioTrack *track = audio_track_at(b, index);
+        if (!track) return;
+        track->included = included;
+    }
+    publish_audio(b);
 }
 
 static void publish_field_result(TrimBackend *b, const char *boundary, const char *serial,
@@ -342,10 +467,13 @@ static void reset_file(TrimBackend *b)
     b->start_ms = b->end_ms = b->duration_ms = 0;
     b->follows_duration = TRUE;
     ++b->file_serial;
+    g_clear_pointer(&b->audio_source, g_free);
+    g_ptr_array_set_size(b->audio_tracks, 0);
     g_clear_pointer(&b->cached_file, g_free);
     clear_keyframes(b);
     publish_mode(b);
     publish_controls(b);
+    publish_audio(b);
 }
 
 static void refresh_duration(TrimBackend *b)
@@ -713,7 +841,8 @@ static gboolean client_message(TrimBackend *b, const mpv_event_client_message *m
     if (binding_action(b, name, NULL)) return TRUE;
     if (g_str_equal(name, "toggle") || g_str_equal(name, "set-enabled") || g_str_equal(name, "set-time") ||
         g_str_equal(name, "gtk-focus") || g_str_equal(name, "set-boundary") ||
-        g_str_equal(name, "keyframe") || g_str_equal(name, "export") || g_str_equal(name, "edit-blur")) {
+        g_str_equal(name, "keyframe") || g_str_equal(name, "export") || g_str_equal(name, "edit-blur") ||
+        g_str_equal(name, "set-audio") || g_str_equal(name, "audio-all")) {
         trim_backend_action(b, name, message->num_args - 1, (const char *const *)(message->args + 1));
         return TRUE;
     }
@@ -778,6 +907,7 @@ TrimBackend *trim_backend_new(mpv_handle *mpv, const char *config_path)
     b->follows_duration = TRUE;
     b->keyframe_target = -1;
     b->keyframes = g_array_new(FALSE, FALSE, sizeof(double));
+    b->audio_tracks = g_ptr_array_new_with_free_func(audio_track_free);
     load_options(b, config_path);
     b->ever_enabled = b->enabled;
     b->exporter = trim_export_new(mpv);
@@ -791,10 +921,12 @@ TrimBackend *trim_backend_new(mpv_handle *mpv, const char *config_path)
     command(b, define);
     mpv_observe_property(mpv, BACKEND_OBSERVE_BASE, "duration", MPV_FORMAT_DOUBLE);
     mpv_observe_property(mpv, BACKEND_OBSERVE_BASE + 1, "vid", MPV_FORMAT_NODE);
+    mpv_observe_property(mpv, BACKEND_OBSERVE_BASE + 2, "track-list", MPV_FORMAT_NODE);
     double position;
     b->loaded = mpv_get_property(mpv, "time-pos", MPV_FORMAT_DOUBLE, &position) >= 0 &&
         !property_flag(b, "idle-active", TRUE);
     refresh_duration(b);
+    if (!refresh_audio(b)) publish_audio(b);
     publish_mode(b);
     if (b->enabled) scan_keyframes(b);
     return b;
@@ -821,14 +953,27 @@ void trim_backend_action(TrimBackend *b, const char *action, int argc, const cha
         if (isfinite(position) && apply_boundary(b, argument,
             MIN((double)b->duration_ms, MAX(0, floor(position * 1000 + .5))))) publish_controls(b);
     } else if (g_str_equal(action, "keyframe")) jump_keyframe(b, argument);
+    else if (g_str_equal(action, "set-audio")) select_audio(b, FALSE, argc, argv);
+    else if (g_str_equal(action, "audio-all")) select_audio(b, TRUE, argc, argv);
     else if (g_str_equal(action, "export")) {
         if (!b->enabled || !available(b) || (!g_str_equal(argument, "keep") && !g_str_equal(argument, "replace")) ||
             trim_export_busy(b->exporter)) return;
         cancel_keyframe_seek(b);
+        if (!refresh_audio(b)) {
+            publish_failure(b, "The export audio selection no longer matches the source file.");
+            return;
+        }
+        g_autoptr(GArray) excluded = g_array_new(FALSE, FALSE, sizeof(gint64));
+        for (guint i = 0; i < b->audio_tracks->len; ++i) {
+            AudioTrack *track = g_ptr_array_index(b->audio_tracks, i);
+            if (!track->included) g_array_append_val(excluded, track->ff_index);
+        }
         gboolean replace = g_str_equal(argument, "replace");
         TrimExportRequest request = {.ffmpeg_path = b->ffmpeg_path, .ffprobe_path = b->ffprobe_path,
+            .expected_input = b->audio_source,
             .replace = replace, .open_result = replace ? b->open_replace : b->open_copy,
-            .start_ms = b->start_ms, .end_ms = b->end_ms};
+            .start_ms = b->start_ms, .end_ms = b->end_ms,
+            .excluded_audio = (const gint64 *)excluded->data, .excluded_audio_count = excluded->len};
         g_autoptr(GError) error = NULL;
         if (!trim_export_start(b->exporter, &request, &error))
             publish_failure(b, error ? error->message : "Could not start the export.");
@@ -846,6 +991,9 @@ gboolean trim_backend_handle_event(TrimBackend *b, const mpv_event *event)
             if (event->error < 0) cancel_keyframe_seek(b);
             return TRUE;
         }
+    } else if (event->event_id == MPV_EVENT_PROPERTY_CHANGE && event->reply_userdata == BACKEND_OBSERVE_BASE + 2) {
+        refresh_audio(b);
+        return TRUE;
     } else if (event->event_id == MPV_EVENT_PROPERTY_CHANGE &&
         (event->reply_userdata == BACKEND_OBSERVE_BASE || event->reply_userdata == BACKEND_OBSERVE_BASE + 1)) {
         if (event->reply_userdata == BACKEND_OBSERVE_BASE + 1) cancel_keyframe_seek(b);
@@ -856,6 +1004,7 @@ gboolean trim_backend_handle_event(TrimBackend *b, const mpv_event *event)
     else if (event->event_id == MPV_EVENT_FILE_LOADED) {
         b->loaded = TRUE;
         refresh_duration(b);
+        refresh_audio(b);
         scan_keyframes(b);
     } else if (event->event_id == MPV_EVENT_SEEK && b->seek_active) {
         double position = property_number(b, "time-pos", NAN);
@@ -882,6 +1031,7 @@ void trim_backend_shutdown(TrimBackend *b)
     b->stopped = TRUE;
     mpv_unobserve_property(b->mpv, BACKEND_OBSERVE_BASE);
     mpv_unobserve_property(b->mpv, BACKEND_OBSERVE_BASE + 1);
+    mpv_unobserve_property(b->mpv, BACKEND_OBSERVE_BASE + 2);
     if (b->wake_source) { g_source_remove(b->wake_source); b->wake_source = 0; }
     if (b->compat) {
         mpv_set_wakeup_callback(b->compat, NULL, NULL);
@@ -894,8 +1044,10 @@ static void backend_unref(TrimBackend *b)
 {
     if (!g_atomic_int_dec_and_test(&b->references)) return;
     g_array_unref(b->keyframes);
+    g_ptr_array_unref(b->audio_tracks);
     g_queue_clear_full(&b->cache, cache_free);
     g_free(b->ffmpeg_path); g_free(b->ffprobe_path); g_free(b->state_path);
+    g_free(b->audio_source);
     g_free(b->cached_file); g_free(b->scan_key);
     g_free(b);
 }

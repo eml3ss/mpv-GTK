@@ -36,7 +36,7 @@
 #include "seek_preview.h"
 
 #define APP_ID "io.github.emless.mpvgtk"
-#define APP_VERSION "0.19.1"
+#define APP_VERSION "0.20.0"
 #define APP_ICON_NAME APP_ID
 #define HWDEC_REFRESH_ID UINT64_C(10001)
 #define HWDEC_SET_ID UINT64_C(10002)
@@ -3222,7 +3222,8 @@ static gboolean key_pressed(GtkEventControllerKey *controller, guint key,
         gtk_menu_button_get_active(GTK_MENU_BUTTON(p->subtitle_button)) ||
         gtk_menu_button_get_active(GTK_MENU_BUTTON(p->speed_button)) ||
         (p->chapter_button && gtk_menu_button_get_active(GTK_MENU_BUTTON(p->chapter_button))) ||
-        (p->app_menu_button && gtk_menu_button_get_active(GTK_MENU_BUTTON(p->app_menu_button))))
+        (p->app_menu_button && gtk_menu_button_get_active(GTK_MENU_BUTTON(p->app_menu_button))) ||
+        trim_mode_audio_menu_open(p->trim))
         return FALSE;
     GtkWidget *focus = gtk_window_get_focus(p->window);
     if (focus && GTK_IS_EDITABLE(focus))
@@ -4169,6 +4170,7 @@ static void activate(GtkApplication *application, gpointer data)
         ".compact-menu > button { background: transparent; padding: 4px 8px;"
         "font-weight: 600; font-variant-numeric: tabular-nums; }"
         ".compact-menu > button:hover { background: alpha(@window_fg_color,.08); }"
+        ".trim-audio-menu > button { padding: 4px; }"
         ".active-track > button { color: @accent_color; background: alpha(@accent_bg_color,.12); }"
         ".timecode { font-variant-numeric: tabular-nums; font-family: 'Adwaita Sans', sans-serif; }"
         ".controls button.trim-active { color: @accent_color; background: alpha(@accent_bg_color,.14); }"

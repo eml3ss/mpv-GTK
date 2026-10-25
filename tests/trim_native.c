@@ -56,6 +56,22 @@ static void assert_original_bytes(RollbackHost *host, const char *path)
     g_assert_cmpstr(hash, ==, host->original_hash);
 }
 
+static void assert_replacement_audio(const char *path)
+{
+    char *arguments[] = {"ffprobe", "-v", "error", "-select_streams", "a",
+        "-show_entries", "stream_tags=language", "-of", "csv=p=0", (char *)path, NULL};
+    int status = -1;
+    g_autofree char *output = NULL;
+    g_autofree char *diagnostic = NULL;
+    g_autoptr(GError) error = NULL;
+    g_assert_true(g_spawn_sync(NULL, arguments, NULL, G_SPAWN_SEARCH_PATH,
+        NULL, NULL, &output, &diagnostic, &status, &error));
+    g_assert_no_error(error);
+    g_assert_true(g_spawn_check_wait_status(status, &error));
+    g_assert_no_error(error);
+    g_assert_cmpstr(g_strstrip(output), ==, "rus");
+}
+
 static char *find_backup(const char *directory)
 {
     g_autoptr(GDir) entries = g_dir_open(directory, 0, NULL);
@@ -85,6 +101,7 @@ static void poll_host(RollbackHost *host)
             assert_original_bytes(host, host->backup);
             g_autofree char *replacement_hash = file_hash(host->source);
             g_assert_cmpstr(replacement_hash, !=, host->original_hash);
+            assert_replacement_audio(host->source);
             /* on_load explicitly permits changing the stream URL while the
              * playlist entry and its path stay attached to the original. */
             g_assert_cmpint(mpv_set_property_string(host->mpv, "stream-open-filename", host->missing), >=, 0);
@@ -121,9 +138,13 @@ static void generate_media(const char *path)
 {
     char *arguments[] = {"ffmpeg", "-nostdin", "-v", "error",
         "-f", "lavfi", "-i", "testsrc2=size=160x90:rate=25:duration=4",
-        "-f", "lavfi", "-i", "sine=sample_rate=48000:duration=4",
+        "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=4",
+        "-f", "lavfi", "-i", "sine=frequency=880:sample_rate=48000:duration=4",
+        "-map", "0:v", "-map", "1:a", "-map", "2:a",
         "-c:v", "libx264", "-preset", "ultrafast", "-g", "25", "-keyint_min", "25",
-        "-sc_threshold", "0", "-threads", "1", "-c:a", "aac", "-shortest", (char *)path, NULL};
+        "-sc_threshold", "0", "-threads", "1", "-c:a", "aac",
+        "-metadata:s:a:0", "language=eng", "-metadata:s:a:1", "language=rus",
+        "-shortest", (char *)path, NULL};
     int status = -1;
     g_autofree char *diagnostic = NULL;
     g_autoptr(GError) error = NULL;
@@ -203,10 +224,20 @@ int main(void)
         if (g_get_monotonic_time() > deadline) g_error("Fixture seek did not finish.");
         poll_host(&host);
     }
+    gint64 excluded_audio[] = {1};
     TrimExportRequest request = {.ffmpeg_path = ffmpeg, .ffprobe_path = ffprobe,
-        .replace = TRUE, .open_result = TRUE, .start_ms = 1000, .end_ms = 2000};
+        .replace = TRUE, .open_result = TRUE, .start_ms = 1000, .end_ms = 2000,
+        .excluded_audio = excluded_audio, .excluded_audio_count = G_N_ELEMENTS(excluded_audio),
+        .expected_input = missing};
+    g_assert_false(trim_export_start(host.exporter, &request, &error));
+    g_assert_error(error, G_IO_ERROR, G_IO_ERROR_BUSY);
+    g_clear_error(&error);
+    g_assert_false(trim_export_busy(host.exporter));
+    request.expected_input = source;
     g_assert_true(trim_export_start(host.exporter, &request, &error));
     g_assert_no_error(error);
+    /* The asynchronous job must own a snapshot of the caller's selection. */
+    excluded_audio[0] = 999;
     deadline = g_get_monotonic_time() + 12000000;
     while (trim_export_busy(host.exporter)) {
         if (g_get_monotonic_time() > deadline) {
@@ -243,6 +274,6 @@ int main(void)
     mpv_terminate_destroy(host.mpv);
     g_free(host.original_hash); g_free(host.backup);
     remove_tree(directory);
-    puts("PASS native C rollback: failed replacement reload restored original bytes, permissions, position, and pause; scripting disabled.");
+    puts("PASS native C rollback: snapshotted audio selection, failed replacement reload restored original bytes, permissions, position, and pause; scripting disabled.");
     return 0;
 }

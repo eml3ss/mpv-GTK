@@ -7,8 +7,13 @@
 typedef struct TrimExport TrimExport;
 typedef struct {
     const char *ffmpeg_path, *ffprobe_path;
+    const char *expected_input; /* Optional mpv path guard for the selection's source. */
     gboolean replace, open_result;
     gint64 start_ms, end_ms;
+    /* Source-wide ff-indices of internal audio streams to omit. The start
+     * call validates and copies this array; NULL/zero preserves all audio. */
+    const gint64 *excluded_audio;
+    gsize excluded_audio_count;
 } TrimExportRequest;
 
 TrimExport *trim_export_new(mpv_handle *mpv);

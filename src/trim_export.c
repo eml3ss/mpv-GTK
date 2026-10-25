@@ -42,6 +42,7 @@ typedef struct ExportJob {
     gboolean saved, pause, user_changed, expected_load, seek_issued, restored;
     double position, open_position;
     gint64 index, entry_id, start_ms, end_ms;
+    GArray *excluded_audio;
     guint timeout;
     uint64_t process_id;
     ProcessStage process_stage;
@@ -130,6 +131,7 @@ static void job_unref(ExportJob *j)
     g_free(j->temp); g_free(j->backup); g_free(j->target); g_free(j->output);
     g_free(j->ffmpeg); g_free(j->ffprobe); g_free(j->phase); g_free(j->failure);
     g_free(j->open_path); g_free(j->idle); g_free(j->force_window);
+    g_clear_pointer(&j->excluded_audio, g_array_unref);
     g_free(j);
 }
 
@@ -730,11 +732,21 @@ static void begin_process(TrimExport *e, ProcessStage stage)
         g_ascii_formatd(start, sizeof(start), "%.3f", j->start_ms / 1000.0);
         g_ascii_formatd(length, sizeof(length), "%.3f", (j->end_ms - j->start_ms) / 1000.0);
         g_autofree char *subtitles = g_strdup_printf("setts=duration='max(0,min(DURATION,%s/TB-PTS))'", length);
-        const char *args[] = {j->ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin", "-n",
-            "-ss", start, "-i", j->source, "-t", length, "-map", "0", "-map_metadata", "0",
+        const char *prefix[] = {j->ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin", "-n",
+            "-ss", start, "-i", j->source, "-t", length, "-map", "0", NULL};
+        const char *suffix[] = {"-map_metadata", "0",
             "-map_chapters", "0", "-c", "copy", "-bsf:s", subtitles,
             "-avoid_negative_ts", "make_zero", j->temp, NULL};
-        run_process(e, args);
+        g_autoptr(GPtrArray) args = g_ptr_array_new_with_free_func(g_free);
+        for (guint i = 0; prefix[i]; ++i) g_ptr_array_add(args, g_strdup(prefix[i]));
+        for (guint i = 0; i < j->excluded_audio->len; ++i) {
+            g_ptr_array_add(args, g_strdup("-map"));
+            g_ptr_array_add(args, g_strdup_printf("-0:%" G_GINT64_FORMAT,
+                g_array_index(j->excluded_audio, gint64, i)));
+        }
+        for (guint i = 0; suffix[i]; ++i) g_ptr_array_add(args, g_strdup(suffix[i]));
+        g_ptr_array_add(args, NULL);
+        run_process(e, (const char *const *)args->pdata);
     } else if (stage == PROCESS_PROBE) {
         publish(e, "verifying");
         const char *args[] = {j->ffprobe, "-v", "error", "-show_entries",
@@ -797,6 +809,42 @@ TrimExport *trim_export_new(mpv_handle *mpv)
     return e;
 }
 
+static gboolean validate_audio_selection(TrimExport *e, const TrimExportRequest *request,
+                                          GError **error)
+{
+    if (!request->excluded_audio_count) return TRUE;
+    mpv_node tracks = {0};
+    gboolean valid = request->excluded_audio && request->excluded_audio_count <= G_MAXUINT &&
+        mpv_get_property(e->mpv, "track-list", MPV_FORMAT_NODE, &tracks) >= 0 &&
+        tracks.format == MPV_FORMAT_NODE_ARRAY && tracks.u.list &&
+        request->excluded_audio_count <= (gsize)tracks.u.list->num;
+    for (gsize i = 0; valid && i < request->excluded_audio_count; ++i) {
+        gint64 index = request->excluded_audio[i];
+        gboolean found = FALSE;
+        if (index < 0) { valid = FALSE; break; }
+        for (gsize previous = 0; previous < i; ++previous)
+            if (request->excluded_audio[previous] == index) { valid = FALSE; break; }
+        for (int n = 0; valid && n < tracks.u.list->num; ++n) {
+            const mpv_node *track = &tracks.u.list->values[n];
+            const mpv_node *type = map_field(track, "type");
+            const mpv_node *external = map_field(track, "external");
+            const mpv_node *filename = map_field(track, "external-filename");
+            if (map_integer(track, "ff-index", -1) == index && type &&
+                type->format == MPV_FORMAT_STRING && g_strcmp0(type->u.string, "audio") == 0 &&
+                !(external && external->format == MPV_FORMAT_FLAG && external->u.flag) &&
+                !(filename && filename->format == MPV_FORMAT_STRING && filename->u.string && *filename->u.string)) {
+                found = TRUE;
+                break;
+            }
+        }
+        valid &= found;
+    }
+    mpv_free_node_contents(&tracks);
+    if (!valid) g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
+        "The export audio selection no longer matches the source file.");
+    return valid;
+}
+
 gboolean trim_export_start(TrimExport *e, const TrimExportRequest *request, GError **error)
 {
     if (!e || e->stopped || e->job) {
@@ -809,10 +857,26 @@ gboolean trim_export_start(TrimExport *e, const TrimExportRequest *request, GErr
         return FALSE;
     }
     char *path = mpv_get_property_string(e->mpv, "path");
+    if (request->expected_input && g_strcmp0(path, request->expected_input) != 0) {
+        mpv_free(path);
+        g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_BUSY,
+            "The source file changed before the export could start.");
+        return FALSE;
+    }
     g_autofree char *resolved = resolved_path(e->mpv, path);
     if (!resolved) {
         mpv_free(path);
         g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED, "Only local video files can be exported.");
+        return FALSE;
+    }
+    if (!validate_audio_selection(e, request, error)) { mpv_free(path); return FALSE; }
+    char *current = mpv_get_property_string(e->mpv, "path");
+    gboolean same_input = g_strcmp0(path, current) == 0;
+    mpv_free(current);
+    if (!same_input) {
+        mpv_free(path);
+        g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_BUSY,
+            "The source file changed before the export could start.");
         return FALSE;
     }
     ExportJob *j = g_new0(ExportJob, 1);
@@ -821,6 +885,9 @@ gboolean trim_export_start(TrimExport *e, const TrimExportRequest *request, GErr
     j->source = g_steal_pointer(&resolved);
     j->replace = request->replace; j->open_result = request->open_result;
     j->start_ms = request->start_ms; j->end_ms = request->end_ms;
+    j->excluded_audio = g_array_sized_new(FALSE, FALSE, sizeof(gint64), (guint)request->excluded_audio_count);
+    if (request->excluded_audio_count)
+        g_array_append_vals(j->excluded_audio, request->excluded_audio, (guint)request->excluded_audio_count);
     j->ffmpeg = g_strdup(request->ffmpeg_path); j->ffprobe = g_strdup(request->ffprobe_path);
     e->job = j;
     publish(e, "preparing");
