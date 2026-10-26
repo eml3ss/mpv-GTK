@@ -15,6 +15,9 @@ typedef struct {
     GtkOverlay *video;
     const char *config_path;
     void (*seek_to)(double seconds, gpointer data);
+    void (*scrub_begin)(gpointer data);
+    void (*scrub_end)(double seconds, gpointer data);
+    void (*scrub_cancel)(gpointer data);
     void (*message)(const char *text, gboolean error, gpointer data);
     gpointer data;
     SeekPreview *previews;

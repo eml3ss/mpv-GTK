@@ -56,6 +56,8 @@ struct TrimMode {
     char *phase;
 };
 
+static void cancel_drag(TrimMode *t);
+
 static void send_action(TrimMode *t, const char *action, const char *argument)
 {
     if (t->stopped || !t->backend) return;
@@ -479,6 +481,7 @@ static void timeline_unmapped(GtkWidget *widget, gpointer data)
     (void)widget;
     TrimMode *t = data;
     t->selection_animated = FALSE;
+    cancel_drag(t);
 }
 
 static void timeline_draw(GtkDrawingArea *area, cairo_t *cr, int width, int height, gpointer data)
@@ -539,6 +542,14 @@ static gboolean flush_seek(gpointer data)
     return G_SOURCE_REMOVE;
 }
 
+static void cancel_drag(TrimMode *t)
+{
+    gboolean dragging = t->dragging;
+    t->dragging = FALSE;
+    if (t->seek_source) { g_source_remove(t->seek_source); t->seek_source = 0; }
+    if (dragging && t->host.scrub_cancel) t->host.scrub_cancel(t->host.data);
+}
+
 static void drag_begin(GtkGestureDrag *gesture, double x, double y, gpointer data)
 {
     (void)y;
@@ -548,6 +559,7 @@ static void drag_begin(GtkGestureDrag *gesture, double x, double y, gpointer dat
         return;
     }
     t->dragging = TRUE;
+    if (t->host.scrub_begin) t->host.scrub_begin(t->host.data);
     t->pending_seek = timeline_seconds(t, x);
     t->host.seek_to(t->pending_seek, t->host.data);
     gtk_gesture_set_state(GTK_GESTURE(gesture), GTK_EVENT_SEQUENCE_CLAIMED);
@@ -570,16 +582,16 @@ static void drag_end(GtkGestureDrag *gesture, double dx, double dy, gpointer dat
     if (!t->dragging) return;
     drag_update(gesture, dx, dy, data);
     if (t->seek_source) { g_source_remove(t->seek_source); t->seek_source = 0; }
-    flush_seek(t);
     t->dragging = FALSE;
+    if (t->host.scrub_end) t->host.scrub_end(t->pending_seek, t->host.data);
+    else flush_seek(t);
 }
 
 static void drag_cancel(GtkGesture *gesture, GdkEventSequence *sequence, gpointer data)
 {
     (void)gesture; (void)sequence;
     TrimMode *t = data;
-    t->dragging = FALSE;
-    if (t->seek_source) { g_source_remove(t->seek_source); t->seek_source = 0; }
+    cancel_drag(t);
 }
 
 static void arrange(TrimMode *t)
@@ -649,7 +661,8 @@ static void build_controls(TrimMode *t)
     gtk_widget_set_hexpand(t->canvas, TRUE);
     gtk_drawing_area_set_content_height(GTK_DRAWING_AREA(t->canvas), 32);
     gtk_drawing_area_set_draw_func(GTK_DRAWING_AREA(t->canvas), timeline_draw, t, NULL);
-    if (t->host.previews) seek_preview_attach(t->host.previews, t->canvas, FALSE);
+    if (t->host.previews)
+        seek_preview_attach_area(t->host.previews, t->canvas, FALSE, GTK_WIDGET(t->host.window));
     g_signal_connect(t->canvas, "unmap", G_CALLBACK(timeline_unmapped), t);
     set_tooltip(t->canvas, "Диапазон обрезки и ключевые кадры");
     GtkGesture *drag = gtk_gesture_drag_new();
@@ -746,7 +759,7 @@ static void set_active(TrimMode *t, gboolean active)
     t->active = active;
     if (!active) {
         if (t->audio_button) gtk_menu_button_popdown(GTK_MENU_BUTTON(t->audio_button));
-        t->dragging = FALSE;
+        cancel_drag(t);
         t->selection_animated = FALSE;
         if (t->seek_source) { g_source_remove(t->seek_source); t->seek_source = 0; }
     }
@@ -958,7 +971,8 @@ gboolean trim_mode_handle_event(TrimMode *t, const mpv_event *event)
         t->video_available = FALSE;
         gtk_widget_set_visible(t->button, FALSE);
         set_active(t, t->mode_enabled);
-        t->available = t->dragging = FALSE;
+        cancel_drag(t);
+        t->available = FALSE;
         t->selection_animated = FALSE;
         t->frame = -1;
         ++t->generation;
@@ -1050,6 +1064,7 @@ gboolean trim_mode_handle_event(TrimMode *t, const mpv_event *event)
 void trim_mode_shutdown(TrimMode *t)
 {
     if (!t || t->stopped) return;
+    cancel_drag(t);
     if (t->audio_button) gtk_menu_button_popdown(GTK_MENU_BUTTON(t->audio_button));
     t->stopped = TRUE;
     if (t->host.mpv) mpv_unobserve_property(t->host.mpv, TRIM_VIDEO_OBSERVE_ID);

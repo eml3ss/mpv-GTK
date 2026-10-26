@@ -3,6 +3,8 @@
 Hover over the playback timeline to see a small GTK card with a video frame
 and the time under the pointer. The same card works on the Trim Mode timeline.
 Previewing does not seek, pause, or otherwise change the playing video.
+An invisible hover area extends 16 pixels above and below the timeline; the
+visible bar keeps its size. The card's arrow points to the hovered position.
 
 Toggle **Timeline hover previews** in **Settings → Interface**. The preference
 is enabled by default, applies immediately, and is saved as `timeline-previews`
@@ -48,7 +50,8 @@ stale results. The card remains passive and does not take keyboard focus or
 hold fullscreen controls open. Its native Wayland input region is empty,
 including after resizes, so moving through the card cannot steal the pointer
 from the timeline or trigger repeated popup/hide cycles. Leaving the timeline
-bounds hides the card and rejects late frames.
+hover area hides the card and rejects late frames. Nearby buttons, entries,
+and other sliders keep their normal pointer behavior.
 
 The focused check `make test-seek-preview` uses generated red/blue video to
 verify decoded frames, timeline mapping, cache reuse, zero per-hover FFmpeg launches, cancellation, and the

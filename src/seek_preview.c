@@ -10,6 +10,7 @@
 
 #define PREVIEW_CACHE_LIMIT 48
 #define PREVIEW_DEBOUNCE_MS 16
+#define PREVIEW_HOVER_MARGIN 16
 
 typedef struct { GtkPopover parent; } PreviewPopover;
 typedef struct { GtkPopoverClass parent; } PreviewPopoverClass;
@@ -56,6 +57,7 @@ static void preview_popover_init(PreviewPopover *popover)
 typedef struct {
     struct SeekPreview *owner;
     GtkWidget *widget;
+    GtkWidget *area;
     GtkEventController *motion;
     gboolean range;
     gboolean had_tooltip;
@@ -348,7 +350,7 @@ static void create_popover(SeekPreview *p)
     if (p->popover) return;
     p->popover = g_object_ref_sink(g_object_new(preview_popover_get_type(), NULL));
     gtk_popover_set_autohide(GTK_POPOVER(p->popover), FALSE);
-    gtk_popover_set_has_arrow(GTK_POPOVER(p->popover), FALSE);
+    gtk_popover_set_has_arrow(GTK_POPOVER(p->popover), TRUE);
     gtk_popover_set_position(GTK_POPOVER(p->popover), GTK_POS_TOP);
     gtk_popover_set_offset(GTK_POPOVER(p->popover), 0, -6);
     gtk_widget_set_can_target(p->popover, FALSE);
@@ -385,6 +387,8 @@ static void create_popover(SeekPreview *p)
         "popover.seek-preview > contents { padding: 6px; border-radius: 11px;"
         "background: @headerbar_bg_color; color: @headerbar_fg_color;"
         "border: 1px solid alpha(@window_fg_color,.13); box-shadow: 0 4px 12px alpha(black,.25); }"
+        "popover.seek-preview > arrow { background: @headerbar_bg_color;"
+        "border: 1px solid alpha(@window_fg_color,.13); }"
         ".seek-preview-image { background: alpha(@window_fg_color,.06); border-radius: 6px; }"
         ".seek-preview-time { font-family: 'Adwaita Sans', sans-serif; font-variant-numeric: tabular-nums;"
         "font-weight: 600; padding: 2px 6px; }");
@@ -479,17 +483,59 @@ static gboolean debounce_finished(gpointer data)
     return G_SOURCE_REMOVE;
 }
 
+static gboolean anchor_coordinates(PreviewAnchor *anchor, double area_x, double area_y,
+                                    double *x, double *y)
+{
+    if (!gtk_widget_get_mapped(anchor->widget)) return FALSE;
+    graphene_point_t point = GRAPHENE_POINT_INIT(area_x, area_y), local;
+    if (!gtk_widget_compute_point(anchor->area, anchor->widget, &point, &local)) return FALSE;
+    *x = local.x;
+    *y = local.y;
+    return TRUE;
+}
+
+static gboolean over_another_control(PreviewAnchor *anchor, double x, double y)
+{
+    GtkWidget *picked = gtk_widget_pick(anchor->area, x, y, GTK_PICK_DEFAULT);
+    for (GtkWidget *widget = picked; widget && widget != anchor->area;
+         widget = gtk_widget_get_parent(widget)) {
+        if (widget == anchor->widget) return FALSE;
+        if (GTK_IS_BUTTON(widget) || GTK_IS_MENU_BUTTON(widget) || GTK_IS_EDITABLE(widget) ||
+            GTK_IS_RANGE(widget) || GTK_IS_POPOVER(widget)) return TRUE;
+    }
+    return FALSE;
+}
+
+static PreviewAnchor *nearest_anchor(SeekPreview *p, GtkWidget *area, double x, double y)
+{
+    PreviewAnchor *nearest = NULL;
+    double distance = G_MAXDOUBLE;
+    for (guint i = 0; i < p->anchors->len; ++i) {
+        PreviewAnchor *candidate = g_ptr_array_index(p->anchors, i);
+        double local_x, local_y;
+        if (candidate->area != area || !anchor_coordinates(candidate, x, y, &local_x, &local_y)) continue;
+        int width = gtk_widget_get_width(candidate->widget), height = gtk_widget_get_height(candidate->widget);
+        int margin = area == candidate->widget ? 0 : PREVIEW_HOVER_MARGIN;
+        if (local_x < 0 || local_x >= width || local_y < -margin || local_y >= height + margin ||
+            over_another_control(candidate, x, y)) continue;
+        double current_distance = fabs(local_y - height / 2.0);
+        if (current_distance < distance) { distance = current_distance; nearest = candidate; }
+    }
+    return nearest;
+}
+
 static void hover_motion(GtkEventControllerMotion *controller, double x, double y, gpointer data)
 {
     (void)controller;
     PreviewAnchor *anchor = data;
     SeekPreview *p = anchor->owner;
-    if (p->stopped || !p->enabled || !gtk_widget_get_mapped(anchor->widget)) return;
-    if (x < 0 || y < 0 || x >= gtk_widget_get_width(anchor->widget) ||
-        y >= gtk_widget_get_height(anchor->widget)) {
-        if (p->hover == anchor) seek_preview_hide(p);
+    if (p->stopped || !p->enabled) return;
+    PreviewAnchor *nearest = nearest_anchor(p, anchor->area, x, y);
+    if (!nearest) {
+        if (p->hover && p->hover->area == anchor->area) seek_preview_hide(p);
         return;
     }
+    if (nearest != anchor || !anchor_coordinates(anchor, x, y, &x, &y)) return;
     if (p->hover != anchor) {
         seek_preview_hide(p);
         p->hover = anchor;
@@ -557,21 +603,30 @@ SeekPreview *seek_preview_new(mpv_handle *mpv)
 
 void seek_preview_attach(SeekPreview *p, GtkWidget *timeline, gboolean is_range)
 {
-    if (!p || p->stopped || !GTK_IS_WIDGET(timeline) || (is_range && !GTK_IS_RANGE(timeline))) return;
+    seek_preview_attach_area(p, timeline, is_range, timeline);
+}
+
+void seek_preview_attach_area(SeekPreview *p, GtkWidget *timeline, gboolean is_range, GtkWidget *area)
+{
+    if (!p || p->stopped || !GTK_IS_WIDGET(timeline) || !GTK_IS_WIDGET(area) ||
+        (is_range && !GTK_IS_RANGE(timeline))) return;
     for (guint i = 0; i < p->anchors->len; ++i)
         if (((PreviewAnchor *)g_ptr_array_index(p->anchors, i))->widget == timeline) return;
     PreviewAnchor *anchor = g_new0(PreviewAnchor, 1);
     anchor->owner = p;
     anchor->widget = g_object_ref(timeline);
+    anchor->area = g_object_ref(area);
     anchor->range = is_range;
     GtkEventController *motion = gtk_event_controller_motion_new();
     gtk_event_controller_set_name(motion, "timeline-preview-motion");
+    gtk_event_controller_set_propagation_phase(motion, GTK_PHASE_CAPTURE);
     g_signal_connect(motion, "enter", G_CALLBACK(hover_motion), anchor);
     g_signal_connect(motion, "motion", G_CALLBACK(hover_motion), anchor);
     g_signal_connect(motion, "leave", G_CALLBACK(hover_leave), anchor);
-    gtk_widget_add_controller(timeline, motion);
+    gtk_widget_add_controller(area, motion);
     anchor->motion = g_object_ref(motion);
     g_signal_connect(timeline, "unmap", G_CALLBACK(anchor_unmapped), anchor);
+    if (area != timeline) g_signal_connect(area, "unmap", G_CALLBACK(anchor_unmapped), anchor);
     g_ptr_array_add(p->anchors, anchor);
 }
 
@@ -606,8 +661,9 @@ void seek_preview_shutdown(SeekPreview *p)
     for (guint i = 0; i < p->anchors->len; ++i) {
         PreviewAnchor *anchor = g_ptr_array_index(p->anchors, i);
         g_signal_handlers_disconnect_by_data(anchor->widget, anchor);
+        if (anchor->area != anchor->widget) g_signal_handlers_disconnect_by_data(anchor->area, anchor);
         g_signal_handlers_disconnect_by_data(anchor->motion, anchor);
-        gtk_widget_remove_controller(anchor->widget, anchor->motion);
+        gtk_widget_remove_controller(anchor->area, anchor->motion);
     }
     clear_cache(p);
 }
@@ -626,7 +682,8 @@ void seek_preview_free(SeekPreview *p)
     g_clear_object(&p->css); g_clear_object(&p->display);
     for (guint i = 0; i < p->anchors->len; ++i) {
         PreviewAnchor *anchor = g_ptr_array_index(p->anchors, i);
-        g_clear_object(&anchor->motion); g_clear_object(&anchor->widget); g_free(anchor);
+        g_clear_object(&anchor->motion); g_clear_object(&anchor->area);
+        g_clear_object(&anchor->widget); g_free(anchor);
     }
     g_ptr_array_unref(p->anchors);
     g_free(p->path); g_free(p->stream); g_free(p->source_key); g_free(p->request_key);

@@ -36,9 +36,10 @@
 #include "seek_preview.h"
 #include "mpris.h"
 #include "mpris_art.h"
+#include "audio_scrub.h"
 
 #define APP_ID "io.github.emless.mpvgtk"
-#define APP_VERSION "0.21.4"
+#define APP_VERSION "0.21.5"
 #define APP_ICON_NAME APP_ID
 #define HWDEC_REFRESH_ID UINT64_C(10001)
 #define HWDEC_SET_ID UINT64_C(10002)
@@ -185,6 +186,8 @@ typedef struct {
     SeekPreview *seek_preview;
     Mpris *mpris;
     MprisArt *mpris_art;
+    AudioScrub *audio_scrub;
+    guint scrub_release_source;
     guint mpris_source;
     GtkWidget *previous_button, *next_button, *chapter_button;
     GtkWidget *seek, *seek_overlay, *volume, *playlist, *sidebar, *stage, *video_overlay;
@@ -738,6 +741,40 @@ static void seek_absolute(Player *p, double seconds)
     p->settle_until = g_get_monotonic_time() + 1500000;
 }
 
+static void scrub_cancel(Player *p)
+{
+    if (p->scrub_release_source) { g_source_remove(p->scrub_release_source); p->scrub_release_source = 0; }
+    p->dragging = p->scrub_pending = FALSE;
+    if (p->audio_scrub) audio_scrub_cancel(p->audio_scrub);
+}
+
+static void scrub_begin(Player *p)
+{
+    if (p->closing || p->quit_requested || !p->mpv || !p->timeline.loaded || p->timeline.duration <= 0) return;
+    if (p->scrub_release_source) { g_source_remove(p->scrub_release_source); p->scrub_release_source = 0; }
+    p->dragging = TRUE;
+    p->seek_settling = p->scrub_pending = FALSE;
+    p->last_scrub_us = 0;
+    if (!p->audio_scrub) p->audio_scrub = audio_scrub_new(p->mpv);
+    audio_scrub_begin(p->audio_scrub);
+}
+
+static void scrub_end(Player *p, double position)
+{
+    if (p->scrub_release_source) { g_source_remove(p->scrub_release_source); p->scrub_release_source = 0; }
+    p->dragging = p->scrub_pending = FALSE;
+    if (p->closing || p->quit_requested || !p->timeline.loaded || p->timeline.duration <= 0) {
+        if (p->audio_scrub) audio_scrub_cancel(p->audio_scrub);
+        return;
+    }
+    p->preview = CLAMP(position, 0, p->timeline.duration);
+    if (p->audio_scrub && audio_scrub_active(p->audio_scrub)) {
+        audio_scrub_end(p->audio_scrub, p->preview);
+        p->seek_settling = TRUE;
+        p->settle_until = g_get_monotonic_time() + 1500000;
+    } else seek_absolute(p, p->preview);
+}
+
 static void scrub_flush(Player *p, gint64 now)
 {
     if (!p->scrub_pending || !p->dragging || p->closing || p->quit_requested ||
@@ -1155,8 +1192,7 @@ static void update_transport(Player *p)
     gtk_widget_set_sensitive(p->play_button, p->timeline.loaded);
     gtk_widget_set_sensitive(p->seek, p->timeline.loaded && p->timeline.duration > 0);
     gtk_widget_set_visible(p->empty, p->idle);
-    const char *status = p->timeline.buffering ? tr("Буферизация…")
-                       : p->timeline.paused ? tr("Пауза") : "";
+    const char *status = p->timeline.buffering ? tr("Буферизация…") : "";
     gtk_label_set_text(GTK_LABEL(p->status_label), status);
 }
 
@@ -1409,6 +1445,7 @@ static void property_changed(Player *p, mpv_event_property *property)
 
 static void handle_event(Player *p, mpv_event *event)
 {
+    if (audio_scrub_handle_event(p->audio_scrub, event)) return;
     /* Once hidden, only drain lifecycle events and the render queue. Late
      * snapshots/command replies must not reopen UI or schedule more work. */
     if (p->quit_requested && event->event_id != MPV_EVENT_HOOK &&
@@ -3357,25 +3394,38 @@ static gboolean video_scrolled(GtkEventControllerScroll *controller, double dx, 
     return TRUE;
 }
 
+static gboolean scrub_release_idle(gpointer data)
+{
+    Player *p = data;
+    p->scrub_release_source = 0;
+    /* GtkRange may apply its final value after the capture-phase release. */
+    if (p->dragging) scrub_end(p, gtk_range_get_value(GTK_RANGE(p->seek)));
+    return G_SOURCE_REMOVE;
+}
+
+static void seek_unmapped(GtkWidget *widget, gpointer data)
+{
+    (void)widget;
+    Player *p = data;
+    if (p->dragging) scrub_cancel(p);
+}
+
 static gboolean seek_event(GtkEventControllerLegacy *controller, GdkEvent *event,
                             gpointer data)
 {
     (void)controller;
     Player *p = data;
     GdkEventType type = gdk_event_get_event_type(event);
+    if ((type == GDK_BUTTON_PRESS || type == GDK_BUTTON_RELEASE) &&
+        gdk_button_event_get_button(event) != GDK_BUTTON_PRIMARY) return FALSE;
     if (type == GDK_BUTTON_PRESS || type == GDK_TOUCH_BEGIN) {
-        p->dragging = TRUE;
-        p->seek_settling = FALSE;
-        p->scrub_pending = FALSE;
-        p->last_scrub_us = 0;
+        scrub_begin(p);
         p->preview = gtk_range_get_value(GTK_RANGE(p->seek));
-    } else if (type == GDK_TOUCH_CANCEL) {
-        p->dragging = FALSE;
-        p->scrub_pending = FALSE;
+    } else if (type == GDK_TOUCH_CANCEL || type == GDK_GRAB_BROKEN) {
+        scrub_cancel(p);
     } else if ((type == GDK_BUTTON_RELEASE || type == GDK_TOUCH_END) && p->dragging) {
-        p->dragging = FALSE;
-        p->scrub_pending = FALSE;
-        seek_absolute(p, gtk_range_get_value(GTK_RANGE(p->seek)));
+        if (!p->scrub_release_source)
+            p->scrub_release_source = g_idle_add(scrub_release_idle, p);
     }
     if (type == GDK_BUTTON_PRESS || type == GDK_BUTTON_RELEASE ||
         type == GDK_TOUCH_BEGIN || type == GDK_TOUCH_END || type == GDK_TOUCH_CANCEL)
@@ -3415,6 +3465,7 @@ static void prepare_close(Player *p)
     if (p->close_prepared)
         return;
     p->close_prepared = TRUE;
+    scrub_cancel(p);
     p->quit_requested = TRUE;
     if (p->mpris_source) { g_source_remove(p->mpris_source); p->mpris_source = 0; }
     seek_preview_shutdown(p->seek_preview);
@@ -3882,6 +3933,10 @@ static void trim_seek_to(double seconds, gpointer data)
     seek_absolute(data, seconds);
 }
 
+static void trim_scrub_begin(gpointer data) { scrub_begin(data); }
+static void trim_scrub_end(double seconds, gpointer data) { scrub_end(data, seconds); }
+static void trim_scrub_cancel(gpointer data) { scrub_cancel(data); }
+
 static void trim_message(const char *message, gboolean error, gpointer data)
 {
     Player *p = data;
@@ -4050,12 +4105,13 @@ static void activate(GtkApplication *application, gpointer data)
     gtk_box_append(GTK_BOX(p->controls), p->seek_overlay);
     p->seek_preview = seek_preview_new(p->mpv);
     seek_preview_set_enabled(p->seek_preview, p->preference_values.timeline_previews);
-    seek_preview_attach(p->seek_preview, p->seek, TRUE);
+    seek_preview_attach_area(p->seek_preview, p->seek, TRUE, GTK_WIDGET(p->window));
     g_signal_connect(p->seek, "value-changed", G_CALLBACK(seek_changed), p);
     GtkEventController *release = gtk_event_controller_legacy_new();
     gtk_event_controller_set_propagation_phase(release, GTK_PHASE_CAPTURE);
     g_signal_connect(release, "event", G_CALLBACK(seek_event), p);
     gtk_widget_add_controller(p->seek, release);
+    g_signal_connect(p->seek, "unmap", G_CALLBACK(seek_unmapped), p);
 
     GtkWidget *transport = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
     gtk_box_append(GTK_BOX(p->controls), transport);
@@ -4182,6 +4238,7 @@ static void activate(GtkApplication *application, gpointer data)
         .status = p->status_label, .time = GTK_LABEL(p->time_label),
         .video = GTK_OVERLAY(p->video_overlay), .config_path = config_path(&p->config),
         .seek_to = trim_seek_to, .message = trim_message, .data = p,
+        .scrub_begin = trim_scrub_begin, .scrub_end = trim_scrub_end, .scrub_cancel = trim_scrub_cancel,
         .previews = p->seek_preview
     };
     p->trim = trim_mode_new(&trim_host);
@@ -4457,6 +4514,9 @@ int main(int argc, char **argv)
     int status = g_application_run(G_APPLICATION(p.application), 1, argv);
     startup_trace_mark("GTK application loop finished");
     p.closing = TRUE;
+    if (p.scrub_release_source) g_source_remove(p.scrub_release_source);
+    audio_scrub_free(p.audio_scrub);
+    p.audio_scrub = NULL;
     if (p.mpris_source) g_source_remove(p.mpris_source);
     mpris_art_free(p.mpris_art);
     p.mpris_art = NULL;
