@@ -35,6 +35,8 @@ gboolean queue_model_handle_event(QueueModel *model, const mpv_event *event);
 
 /* Mutations resolve stable IDs against fresh native snapshots. Reordering
  * never reloads media or changes the current playing entry. */
+/* Rapid activations keep only the latest requested stable ID. Selecting the
+ * current entry resumes it without reopening the file or resetting time. */
 void queue_model_play(QueueModel *model, int64_t id);
 void queue_model_remove(QueueModel *model, const int64_t *ids, gsize count);
 /* before_id == -1 moves the entry to the end. */

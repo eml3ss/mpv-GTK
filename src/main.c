@@ -41,7 +41,7 @@
 #include "queue_view.h"
 
 #define APP_ID "io.github.emless.mpvgtk"
-#define APP_VERSION "0.22.5"
+#define APP_VERSION "0.22.6"
 #define APP_ICON_NAME APP_ID
 #define HWDEC_REFRESH_ID UINT64_C(10001)
 #define HWDEC_SET_ID UINT64_C(10002)
@@ -193,7 +193,8 @@ typedef struct {
     QueueModel *queue_model;
     QueueView *queue_view;
     GtkPaned *queue_paned;
-    int queue_width, initial_queue_sort;
+    int queue_width, queue_paned_width, initial_queue_sort;
+    gboolean queue_width_clamping;
     guint initial_queue_sort_source;
     gboolean initial_queue_sort_pending;
     guint scrub_release_source;
@@ -297,6 +298,7 @@ static void clear_track_notices(Player *p);
 static void hide_track_notice(Player *p);
 static void request_track_notice(Player *p, gboolean audio, gboolean silent);
 static gboolean start_mpris_idle(gpointer data);
+static void clamp_queue_width(Player *p);
 
 static GtkWidget *player_video_widget(Player *p)
 {
@@ -874,6 +876,9 @@ static gboolean tick(GtkWidget *widget, GdkFrameClock *clock, gpointer data)
     gint64 now = gdk_frame_clock_get_frame_time(clock);
     gint64 monotonic = g_get_monotonic_time();
     update_controls_visibility(p, monotonic);
+    if (p->queue_paned && p->queue_view &&
+        gtk_widget_get_width(GTK_WIDGET(p->queue_paned)) != p->queue_paned_width)
+        clamp_queue_width(p);
     scrub_flush(p, monotonic);
     if (p->hwdec_refresh_at && monotonic >= p->hwdec_refresh_at)
         request_hwdec_state(p);
@@ -976,13 +981,45 @@ static gboolean apply_initial_queue_sort(gpointer data)
     return G_SOURCE_REMOVE;
 }
 
+static void clamp_queue_width(Player *p)
+{
+    if (!p->queue_paned || !p->queue_view || p->queue_width_clamping ||
+        p->closing || p->quit_requested)
+        return;
+    int width = gtk_widget_get_width(GTK_WIDGET(p->queue_paned));
+    if (width <= 0) return;
+    p->queue_paned_width = width;
+    int minimum = 0, maximum = width;
+    g_object_get(p->queue_paned, "min-position", &minimum,
+                 "max-position", &maximum, NULL);
+    if (maximum <= 0 || maximum > width) maximum = width;
+    /* Allow the queue's minimum to shrink in small windows, keeping the
+     * divider limits feasible and the video visible at every window size. */
+    int lower = MIN(maximum, MAX(minimum, (width + 1) / 2));
+    int upper = MIN(maximum, MAX(lower, width - MIN(240, width / 2)));
+    int position = gtk_paned_get_position(p->queue_paned);
+    int limited = CLAMP(position, lower, upper);
+    if (position != limited) {
+        p->queue_width_clamping = TRUE;
+        gtk_paned_set_position(p->queue_paned, limited);
+        p->queue_width_clamping = FALSE;
+    }
+}
+
+static void queue_width_changed(GObject *object, GParamSpec *property, gpointer data)
+{
+    (void)object; (void)property;
+    clamp_queue_width(data);
+}
+
 static void restore_queue_width(Player *p)
 {
     if (!p->queue_paned || !p->queue_view) return;
     int width = gtk_widget_get_width(GTK_WIDGET(p->queue_paned));
     if (width <= 0) return;
-    int side = p->queue_width > 0 ? p->queue_width : 326;
-    gtk_paned_set_position(p->queue_paned, MAX(160, width - side));
+    int side = p->queue_width > 0 ? p->queue_width : 320;
+    gtk_paned_set_position(p->queue_paned, MAX(width / 2, width - side));
+    clamp_queue_width(p);
 }
 
 static void queue_paned_mapped(GtkWidget *widget, gpointer data)
@@ -4124,12 +4161,13 @@ static void activate(GtkApplication *application, gpointer data)
     GtkWidget *body = gtk_paned_new(GTK_ORIENTATION_HORIZONTAL);
     p->queue_paned = GTK_PANED(body);
     gtk_widget_add_css_class(body, "queue-split");
-    gtk_paned_set_wide_handle(p->queue_paned, TRUE);
+    gtk_paned_set_wide_handle(p->queue_paned, FALSE);
     gtk_paned_set_resize_start_child(p->queue_paned, TRUE);
     gtk_paned_set_resize_end_child(p->queue_paned, FALSE);
     gtk_paned_set_shrink_start_child(p->queue_paned, TRUE);
-    gtk_paned_set_shrink_end_child(p->queue_paned, FALSE);
+    gtk_paned_set_shrink_end_child(p->queue_paned, TRUE);
     g_signal_connect(body, "map", G_CALLBACK(queue_paned_mapped), p);
+    g_signal_connect(body, "notify::position", G_CALLBACK(queue_width_changed), p);
     gtk_widget_set_vexpand(body, TRUE);
     gtk_overlay_set_child(GTK_OVERLAY(p->stage), body);
     GtkWidget *overlay = gtk_overlay_new();
@@ -4426,8 +4464,7 @@ static void activate(GtkApplication *application, gpointer data)
         ".queue-rows > row { padding: 0; border-radius: 7px; margin: 2px 6px; }"
         ".queue-entry.queue-current .queue-entry-title, .queue-current .queue-index { color: @accent_color; }"
         ".queue-index { font-variant-numeric: tabular-nums; }"
-        ".queue-entry.drop-before { box-shadow: inset 0 2px @accent_bg_color; }"
-        ".queue-entry.drop-after { box-shadow: inset 0 -2px @accent_bg_color; }"
+
         ".queue-editor button.queue-action { min-width: 24px; min-height: 24px;"
         "padding: 4px 8px; border-radius: 7px; }"
         ".queue-editor .queue-sort > button { min-height: 24px; padding: 4px 8px; border-radius: 7px; }"
@@ -4485,14 +4522,12 @@ static void activate(GtkApplication *application, gpointer data)
         "background: alpha(@window_fg_color,.08); }"
         ".queue-editor .queue-selection-bar button.queue-action {"
         "min-height: 20px; padding: 2px 6px; }"
-        ".queue-editor .queue-row-body { transition: transform 160ms cubic-bezier(.2,.9,.25,1.12), opacity 100ms ease; }"
-        ".queue-editor .queue-row-body.queue-drag-source { opacity: 0; }"
         ".queue-editor .queue-sort-option.queue-sort-active { color: @accent_color; background: alpha(@accent_bg_color,.12); }"
-        ".queue-split > separator { min-width: 6px; background: alpha(@window_fg_color,.06); }"
-        ".queue-split > separator:hover { background: alpha(@accent_bg_color,.20); }"
-        ".queue-editor.queue-dragging .queue-entry:selected { background: transparent; }"
-        ".queue-editor.queue-dragging .queue-entry:selected > .queue-row-body {"
-        "background: alpha(@accent_bg_color,.30); border-radius: 7px; }"
+        ".queue-split > separator { min-width: 0; padding: 0; margin: 0; border: none;"
+        "background: transparent; background-image: none; box-shadow: none; outline: none; }"
+        ".queue-split > separator:hover, .queue-split > separator:active, .queue-split > separator:focus-visible {"
+        "background: transparent; background-image: none; box-shadow: none; outline: none; }"
+        ".queue-rows:drop(active), .queue-entry:drop(active) { outline: none; box-shadow: none; border-color: transparent; }"
         "popover.chapters-popover > contents { padding: 4px; }"
         "list.chapters-list { padding: 0; }"
         "list.chapters-list > row { min-height: 0; padding: 2px 6px; margin: 1px 0; border-radius: 5px; }"

@@ -41,7 +41,7 @@ struct QueueModel {
     Action action;
     Request request;
     uint64_t request_id;
-    int64_t entry_id, before_id;
+    int64_t entry_id, before_id, pending_play;
     guint remove_cursor, commands, command_limit;
     QueueSort sort;
     int sort_mode;
@@ -111,6 +111,8 @@ static void changed(QueueModel *m)
 
 static void finish(QueueModel *m, const char *error)
 {
+    int64_t pending_play = m->pending_play;
+    m->pending_play = -1;
     if (!error && m->action == ACTION_SORT && m->entries->len)
         m->sort_mode = m->sort;
     else if (!m->entries->len || (!error && (m->action == ACTION_SHUFFLE ||
@@ -124,7 +126,10 @@ static void finish(QueueModel *m, const char *error)
     g_clear_pointer(&m->date_entries, g_ptr_array_unref);
     if (m->date_cancel) g_cancellable_cancel(m->date_cancel);
     g_clear_object(&m->date_cancel);
-    changed(m);
+    if (pending_play >= 0 && !m->stopped)
+        queue_model_play(m, pending_play);
+    else
+        changed(m);
     if (error && !m->stopped && m->error) m->error(error, m->data);
 }
 
@@ -138,6 +143,7 @@ QueueModel *queue_model_new(mpv_handle *mpv, void (*changed_cb)(gpointer),
     m->entries = g_ptr_array_new_with_free_func(entry_free);
     m->repeat = g_strdup("no");
     m->sort_mode = -1;
+    m->pending_play = -1;
     m->changed = changed_cb;
     m->error = error_cb;
     m->data = data;
@@ -530,7 +536,9 @@ static void process_snapshot(QueueModel *m)
         if (index < 0) { finish(m, NULL); return; }
         char text[32];
         g_snprintf(text, sizeof(text), "%d", index);
-        const char *args[] = {"playlist-play-index", text, NULL};
+        /* Match the original queue activation: selecting the current entry
+         * resumes it without reopening the file or resetting its position. */
+        const char *args[] = {"set", "playlist-pos", text, NULL};
         m->started = TRUE;
         run(m, args);
     } else if (m->action == ACTION_CLEAR) {
@@ -578,10 +586,16 @@ gboolean queue_model_handle_event(QueueModel *m, const mpv_event *event)
             queue_model_update_repeat(m, *(const char *const *)property->data);
         finish(m, NULL);
     } else if (request == REQUEST_COMMAND) {
-        if (m->action == ACTION_PLAY && !m->resume_sent) {
-            m->resume_sent = TRUE;
-            const char *args[] = {"set", "pause", "no", NULL};
-            run(m, args);
+        if (m->action == ACTION_PLAY) {
+            if (m->pending_play >= 0 || m->resume_sent) {
+                /* Native playlist observations publish the resulting state;
+                 * another full snapshot would only delay the next click. */
+                finish(m, NULL);
+            } else {
+                m->resume_sent = TRUE;
+                const char *args[] = {"set", "pause", "no", NULL};
+                run(m, args);
+            }
         } else if (m->action == ACTION_REPEAT) {
             int status = mpv_get_property_async(m->mpv, request_id(m, REQUEST_REPEAT),
                                                "loop-playlist", MPV_FORMAT_STRING);
@@ -593,7 +607,19 @@ gboolean queue_model_handle_event(QueueModel *m, const mpv_event *event)
 
 void queue_model_play(QueueModel *m, int64_t id)
 {
-    if (id < 0 || !begin(m, ACTION_PLAY)) return;
+    if (!m || m->stopped || id < 0) return;
+    if (m->action != ACTION_NONE) {
+        if (m->action == ACTION_PLAY && !m->started) {
+            /* The requested snapshot has not yet resolved an index. Use it
+             * to validate the latest clicked ID instead of loading old ones. */
+            m->entry_id = id;
+            m->pending_play = -1;
+        } else {
+            m->pending_play = m->action == ACTION_PLAY && m->entry_id == id ? -1 : id;
+        }
+        return;
+    }
+    if (!begin(m, ACTION_PLAY)) return;
     m->entry_id = id;
     snapshot(m);
 }

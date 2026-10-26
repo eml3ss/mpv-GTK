@@ -6,13 +6,14 @@ playback changes. Ctrl-click adds individual entries to the selection,
 Shift-click selects a range, and Ctrl+A selects the visible entries. This
 explicit selection stays in place while playback changes. Delete or the remove
 button removes the selected entries from the queue. Files on disk are unchanged.
-Drag the divider between the video and queue to resize the panel. Its width
-is retained when the panel is closed and reopened within the same window.
+Drag the edge between the video and queue to resize the panel. The resize
+area has no visible bar, and the queue is limited to half the window width.
+Its width is retained when the panel is closed and reopened in the same window.
 
 Drag an entry by its handle to move it before or after another entry. The grab
-area extends around the small grip, and neighboring entries animate aside to
-open a gap the height of a complete entry. The insertion line shows its
-destination. Search matches titles and paths without changing the underlying
+area extends around the small grip. Complete rows move aside to open one
+entry-sized gap at the destination, with their text and background kept
+together. Search matches titles and paths without changing the underlying
 queue. Dragging or removing filtered results still targets the original
 entries, including when the same file occurs more than once.
 
@@ -35,6 +36,8 @@ preference does not reorder the active queue.
 Clear stops playback and empties the entire queue. Removing the currently
 playing entry lets mpv advance to the next one. Queue editing controls are
 temporarily disabled while an operation finishes.
+Rapid playback selections use the last requested entry. Clicking the current
+entry resumes it without reopening the file or resetting its position.
 
 The editor and its playlist subscription are created when the panel opens;
 closing the panel releases its widgets. Run `make test-queue-model` for the
