@@ -11,6 +11,9 @@
 #define PREVIEW_CACHE_LIMIT 48
 #define PREVIEW_DEBOUNCE_MS 16
 #define PREVIEW_HOVER_MARGIN 16
+#define DURATION_OBSERVE_ID (UINT64_C(1) << 56)
+#define DURATION_QUERY_BASE (DURATION_OBSERVE_ID + (UINT64_C(1) << 32))
+#define DURATION_QUERY_LIMIT (DURATION_OBSERVE_ID + (UINT64_C(1) << 33))
 
 typedef struct { GtkPopover parent; } PreviewPopover;
 typedef struct { GtkPopoverClass parent; } PreviewPopoverClass;
@@ -78,15 +81,18 @@ struct SeekPreview {
     GtkCssProvider *css;
     GdkDisplay *display;
     GQueue cache;
-    gboolean enabled, stopped, checked, available, local, inside;
+    gboolean enabled, stopped, checked, available, local, inside, nvdec;
     gboolean target_ready;
+    gboolean duration_known, duration_loading;
     char *path, *stream, *source_key, *request_key;
     gint64 ff_index;
     double duration, offset, end_guard, seconds, pointer_x;
+    double duration_cache;
     gint64 bucket, request_bucket;
     guint generation, request_generation;
     guint debounce_source;
     guint64 serial, request;
+    guint64 duration_request, duration_serial;
 };
 
 static void request_frame(SeekPreview *p);
@@ -243,8 +249,16 @@ static void check_source(SeekPreview *p)
     if (p->checked || p->stopped) return;
     p->checked = TRUE;
     p->available = p->local = FALSE;
-    double duration = property_number(p, "duration", 0);
+    double duration = p->duration_known ? p->duration_cache
+        : p->enabled ? property_number(p, "duration", 0) : 0;
     if (duration <= 0 || duration >= (double)G_MAXINT64 / 2) { forget_local_source(p); return; }
+    p->duration_known = TRUE;
+    p->duration_cache = duration;
+    p->available = TRUE;
+    p->duration = duration;
+    /* Timestamp hovers need only duration. Keep source/track inspection and
+     * decoder resources out of the time-only path, including audio files. */
+    if (!p->enabled) { forget_local_source(p); return; }
     mpv_node video = {0};
     if (mpv_get_property(p->mpv, "current-tracks/video", MPV_FORMAT_NODE, &video) < 0 ||
         video.format != MPV_FORMAT_NODE_MAP || field_flag(&video, "image") || field_flag(&video, "albumart")) {
@@ -252,8 +266,6 @@ static void check_source(SeekPreview *p)
         forget_local_source(p);
         return;
     }
-    p->available = TRUE;
-    p->duration = duration;
     if (property_flag(p, "demuxer-via-network", FALSE)) {
         mpv_free_node_contents(&video);
         forget_local_source(p);
@@ -292,7 +304,8 @@ static void check_source(SeekPreview *p)
     p->offset = offset;
     p->local = TRUE;
     char *hwdec = mpv_get_property_string(p->mpv, "hwdec-current");
-    preview_decoder_set_hardware(p->decoder, hwdec && g_str_has_prefix(hwdec, "nvdec"));
+    p->nvdec = hwdec && g_str_has_prefix(hwdec, "nvdec");
+    preview_decoder_set_hardware(p->decoder, p->nvdec);
     mpv_free(hwdec);
 }
 
@@ -389,6 +402,8 @@ static void create_popover(SeekPreview *p)
         "border: 1px solid alpha(@window_fg_color,.13); box-shadow: 0 4px 12px alpha(black,.25); }"
         "popover.seek-preview > arrow { background: @headerbar_bg_color;"
         "border: 1px solid alpha(@window_fg_color,.13); }"
+        "popover.seek-preview.time-only > contents { padding: 4px; border-radius: 9px; }"
+        "popover.seek-preview.time-only .seek-preview-time { padding: 0 3px; font-weight: 500; }"
         ".seek-preview-image { background: alpha(@window_fg_color,.06); border-radius: 6px; }"
         ".seek-preview-time { font-family: 'Adwaita Sans', sans-serif; font-variant-numeric: tabular-nums;"
         "font-weight: 600; padding: 2px 6px; }");
@@ -399,9 +414,12 @@ static void create_popover(SeekPreview *p)
 
 static void show_card(SeekPreview *p, PreviewFrame *frame, gboolean loading)
 {
-    if (!p->enabled || p->stopped || !p->inside || !p->hover || !p->available ||
+    if (p->stopped || !p->inside || !p->hover || !p->available ||
         !gtk_widget_get_mapped(p->hover->widget)) return;
+    if (!p->enabled) { frame = NULL; loading = FALSE; }
     create_popover(p);
+    if (loading || (frame && frame->texture)) gtk_widget_remove_css_class(p->popover, "time-only");
+    else gtk_widget_add_css_class(p->popover, "time-only");
     GtkWidget *anchor = p->hover->widget;
     if (gtk_widget_get_parent(p->popover) != anchor) {
         gtk_popover_popdown(GTK_POPOVER(p->popover));
@@ -459,7 +477,8 @@ static void decoder_frame_ready(const PreviewDecoderFrame *frame, gpointer data)
 
 static void request_frame(SeekPreview *p)
 {
-    if (p->stopped || !p->enabled || !p->inside || !p->target_ready || !p->hover || !p->available) return;
+    if (p->stopped || !p->inside || !p->target_ready || !p->hover || !p->available) return;
+    if (!p->enabled) { show_card(p, NULL, FALSE); return; }
     PreviewFrame *cached = cached_frame(p, p->bucket);
     if (cached && cached->refined) { show_card(p, cached, FALSE); return; }
     if (!p->local) { show_card(p, NULL, FALSE); return; }
@@ -471,6 +490,10 @@ static void request_frame(SeekPreview *p)
     p->request_generation = p->generation;
     g_free(p->request_key); p->request_key = g_strdup(p->source_key);
     double second = MIN(p->bucket / 2.0, MAX(0, p->duration - p->end_guard)) + p->offset;
+    if (!p->decoder) {
+        p->decoder = preview_decoder_new(decoder_frame_ready, p);
+        preview_decoder_set_hardware(p->decoder, p->nvdec);
+    }
     preview_decoder_request(p->decoder, p->source_key, p->path, p->ff_index, second, p->request);
 }
 
@@ -529,7 +552,7 @@ static void hover_motion(GtkEventControllerMotion *controller, double x, double 
     (void)controller;
     PreviewAnchor *anchor = data;
     SeekPreview *p = anchor->owner;
-    if (p->stopped || !p->enabled) return;
+    if (p->stopped) return;
     PreviewAnchor *nearest = nearest_anchor(p, anchor->area, x, y);
     if (!nearest) {
         if (p->hover && p->hover->area == anchor->area) seek_preview_hide(p);
@@ -540,6 +563,8 @@ static void hover_motion(GtkEventControllerMotion *controller, double x, double 
         seek_preview_hide(p);
         p->hover = anchor;
     }
+    p->inside = TRUE;
+    p->pointer_x = x;
     check_source(p);
     if (!p->available) {
         if (p->popover) gtk_popover_popdown(GTK_POPOVER(p->popover));
@@ -549,12 +574,15 @@ static void hover_motion(GtkEventControllerMotion *controller, double x, double 
         anchor->had_tooltip = TRUE;
         gtk_widget_set_has_tooltip(anchor->widget, FALSE);
     }
-    p->inside = TRUE;
-    p->pointer_x = x;
     p->seconds = fraction_at(anchor, x) * p->duration;
     gint64 bucket = (gint64)floor(p->seconds * 2);
     gboolean changed = bucket != p->bucket;
     p->bucket = bucket;
+    if (!p->enabled) {
+        p->target_ready = TRUE;
+        show_card(p, NULL, FALSE);
+        return;
+    }
     PreviewFrame *frame = cached_frame(p, bucket);
     if (frame && frame->refined) {
         cancel_debounce(p);
@@ -594,10 +622,10 @@ SeekPreview *seek_preview_new(mpv_handle *mpv)
     g_return_val_if_fail(mpv != NULL, NULL);
     SeekPreview *p = g_new0(SeekPreview, 1);
     p->mpv = mpv;
-    p->decoder = preview_decoder_new(decoder_frame_ready, p);
     p->enabled = TRUE;
     p->bucket = -1;
     p->anchors = g_ptr_array_new();
+    mpv_observe_property(mpv, DURATION_OBSERVE_ID, "duration", MPV_FORMAT_DOUBLE);
     return p;
 }
 
@@ -635,17 +663,69 @@ void seek_preview_set_enabled(SeekPreview *p, gboolean enabled)
     if (!p || p->stopped || p->enabled == !!enabled) return;
     p->enabled = !!enabled;
     preview_decoder_set_enabled(p->decoder, p->enabled);
+    cancel_debounce(p);
+    abort_request(p);
+    p->checked = FALSE;
     if (!p->enabled) {
-        seek_preview_hide(p);
         clear_cache(p);
+        forget_local_source(p);
+    }
+    if (p->inside && p->hover) {
+        check_source(p);
+        if (!p->available) { seek_preview_hide(p); return; }
+        p->seconds = fraction_at(p->hover, p->pointer_x) * p->duration;
+        p->bucket = (gint64)floor(p->seconds * 2);
+        p->target_ready = TRUE;
+        request_frame(p);
+    }
+}
+
+static void cache_duration(SeekPreview *p, const mpv_event_property *property)
+{
+    double value = property && property->format == MPV_FORMAT_DOUBLE && property->data
+        ? *(double *)property->data : 0;
+    p->duration_known = isfinite(value) && value > 0;
+    p->duration_cache = p->duration_known ? value : 0;
+    p->checked = FALSE;
+    if (!p->enabled && p->inside && p->hover) {
+        check_source(p);
+        if (!p->available) {
+            if (p->popover) gtk_popover_popdown(GTK_POPOVER(p->popover));
+            return;
+        }
+        p->seconds = fraction_at(p->hover, p->pointer_x) * p->duration;
+        p->target_ready = TRUE;
+        show_card(p, NULL, FALSE);
     }
 }
 
 gboolean seek_preview_handle_event(SeekPreview *p, const mpv_event *event)
 {
     if (!p || p->stopped || !event) return FALSE;
+    if (event->event_id == MPV_EVENT_VIDEO_RECONFIG && !p->enabled) return FALSE;
+    if (event->event_id == MPV_EVENT_PROPERTY_CHANGE && event->reply_userdata == DURATION_OBSERVE_ID) {
+        if (!p->duration_loading) cache_duration(p, event->data);
+        return TRUE;
+    }
+    if (event->event_id == MPV_EVENT_GET_PROPERTY_REPLY && event->reply_userdata >= DURATION_QUERY_BASE &&
+        event->reply_userdata < DURATION_QUERY_LIMIT) {
+        if (event->reply_userdata == p->duration_request) {
+            p->duration_request = 0;
+            if (event->error >= 0 && !p->duration_loading) cache_duration(p, event->data);
+        }
+        return TRUE;
+    }
     if (event->event_id == MPV_EVENT_START_FILE || event->event_id == MPV_EVENT_END_FILE ||
         event->event_id == MPV_EVENT_FILE_LOADED || event->event_id == MPV_EVENT_VIDEO_RECONFIG) {
+        if (event->event_id == MPV_EVENT_START_FILE || event->event_id == MPV_EVENT_END_FILE) {
+            p->duration_known = FALSE; p->duration_cache = 0;
+            p->duration_loading = TRUE; p->duration_request = 0;
+        } else if (event->event_id == MPV_EVENT_FILE_LOADED) {
+            p->duration_loading = FALSE;
+            p->duration_request = DURATION_QUERY_BASE + ++p->duration_serial;
+            if (mpv_get_property_async(p->mpv, p->duration_request, "duration", MPV_FORMAT_DOUBLE) < 0)
+                p->duration_request = 0;
+        }
         invalidate_source(p);
         return FALSE;
     }
@@ -657,6 +737,7 @@ void seek_preview_shutdown(SeekPreview *p)
     if (!p || p->stopped) return;
     seek_preview_hide(p);
     p->stopped = TRUE;
+    mpv_unobserve_property(p->mpv, DURATION_OBSERVE_ID);
     preview_decoder_set_enabled(p->decoder, FALSE);
     for (guint i = 0; i < p->anchors->len; ++i) {
         PreviewAnchor *anchor = g_ptr_array_index(p->anchors, i);

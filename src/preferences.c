@@ -1537,7 +1537,7 @@ static void build_interface(Preferences *p)
     gtk_spin_button_set_digits(p->cursor_hide_delay, 1);
     gtk_spin_button_set_snap_to_ticks(p->cursor_hide_delay, TRUE);
     p->timeline_previews = add_switch(p, interface, "timeline-previews", tr("Превью при наведении"),
-        tr("Показывает кадр и время над полосой воспроизведения. Кадры загружаются по запросу."));
+        tr("Показывает кадр над полосой воспроизведения. При отключении остаётся только время."));
     p->allow_replace = add_switch(p, interface, "ui-allow-replace", tr("Разрешать замену файла"),
         tr("При открытии и перетаскивании разрешает заменить текущий файл. Если оба режима выключены, открытый файл сохраняется."));
     p->add_to_queue = add_switch(p, interface, "ui-add-to-queue", tr("Добавлять файлы в очередь"),

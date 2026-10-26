@@ -241,6 +241,7 @@ static void assert_watch_later_clean(ScrubMedia *media, const char *directory)
         g_autofree char *contents = NULL;
         g_assert_true(g_file_get_contents(path, &contents, NULL, NULL));
         g_assert_null(strstr(contents, "volume-gain"));
+        g_assert_null(strstr(contents, "pause="));
         found |= strstr(contents, "start=") != NULL; /* Parent redirects contain no position. */
     }
     g_assert_true(found);
@@ -355,6 +356,40 @@ int main(void)
     release_at(&media, 6, 6.5, TRUE);
     puts("PASS audio ownership: original/latest gain, mute, volume, track, and user filters preserved.");
 
+    /* A playing-start gesture must hold the selected frame even when the
+     * pointer stops moving; repeated seeks are not a substitute for pausing. */
+    set_flag_native(&media, "pause", FALSE);
+    scrub_begin(p); await_gain(&media, TEST_SILENT_GAIN);
+    previous_restart = media.restarts;
+    scrub_queue(p, 4, g_get_monotonic_time());
+    await_restart(&media, previous_restart);
+    pump(&media, 30000); /* Drain the frame's coalesced position observations. */
+    double held_position = native_number(&media, "time-pos");
+    double held_timeline = p->timeline.position;
+    g_autofree char *held_frame = video_frame_hash(&media);
+    guint held_seeks = interactive_seeks;
+    pump(&media, 500000);
+    g_assert_cmpfloat_with_epsilon(native_number(&media, "time-pos"), held_position, .001);
+    g_assert_cmpfloat_with_epsilon(p->timeline.position, held_timeline, .001);
+    g_autofree char *stationary_frame = video_frame_hash(&media);
+    g_assert_cmpstr(stationary_frame, ==, held_frame);
+    g_assert_cmpuint(interactive_seeks, ==, held_seeks);
+    g_assert_true(native_flag(&media, "pause"));
+    await_gain(&media, TEST_SILENT_GAIN);
+    previous_restart = media.restarts;
+    scrub_queue(p, 5, g_get_monotonic_time());
+    await_position(&media, 5, TRUE);
+    await_restart(&media, previous_restart);
+    g_autofree char *moved_frame = video_frame_hash(&media);
+    g_assert_cmpstr(moved_frame, !=, held_frame);
+    g_assert_true(native_flag(&media, "pause"));
+    release_at(&media, 8, 6.5, FALSE);
+    double resumed_position = native_number(&media, "time-pos");
+    pump(&media, 250000);
+    g_assert_cmpfloat(native_number(&media, "time-pos"), >, resumed_position + .12);
+    g_assert_false(native_flag(&media, "pause"));
+    puts("PASS playing-start hold: selected frame stays fixed for 500 ms without extra seeks, release resumes playback.");
+
     set_flag_native(&media, "pause", FALSE);
     scrub_begin(p); await_gain(&media, TEST_SILENT_GAIN);
     const gint64 now = g_get_monotonic_time();
@@ -362,7 +397,7 @@ int main(void)
     release_at(&media, 8, 6.5, FALSE);
     g_assert_false(media.paused);
     set_flag_native(&media, "pause", TRUE);
-    puts("PASS playing rapid release: final target wins before sound resumes, play state unchanged.");
+    puts("PASS playing rapid release: final target wins before playback and sound resume.");
 
     scrub_begin(p); await_gain(&media, TEST_SILENT_GAIN);
     scrub_end(p, 3);

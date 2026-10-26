@@ -13,6 +13,7 @@ void seek_preview_attach(SeekPreview *preview, GtkWidget *timeline, gboolean is_
  * buttons, entries, other ranges, and popovers keep their normal behavior. */
 void seek_preview_attach_area(SeekPreview *preview, GtkWidget *timeline, gboolean is_range,
                               GtkWidget *hover_area);
+/* Toggle frame thumbnails; a compact timestamp hover remains available. */
 void seek_preview_set_enabled(SeekPreview *preview, gboolean enabled);
 gboolean seek_preview_handle_event(SeekPreview *preview, const mpv_event *event);
 void seek_preview_hide(SeekPreview *preview);

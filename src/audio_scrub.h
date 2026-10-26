@@ -6,9 +6,10 @@
 
 typedef struct AudioScrub AudioScrub;
 
-/* Use from the creating main context. Begin queues gain capture/suppression
- * before subsequent seek commands. End submits the final exact seek and
- * restores gain after it settles; cancellation restores without seeking. */
+/* Use from the creating main context. Begin captures gain/play state and
+ * holds playback paused and silent before subsequent drag seeks. End submits
+ * the final exact seek, then restores both states after it settles;
+ * cancellation restores without seeking. */
 AudioScrub *audio_scrub_new(mpv_handle *mpv);
 void audio_scrub_begin(AudioScrub *scrub);
 void audio_scrub_end(AudioScrub *scrub, double position);

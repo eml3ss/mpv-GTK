@@ -164,6 +164,56 @@ static void wait_color(PreviewHost *host, GtkWidget *timeline, gboolean blue)
         gtk_label_get_text(GTK_LABEL(label)), 0, 0));
 }
 
+static void wait_clock(PreviewHost *host, GtkWidget *timeline, gboolean blue)
+{
+    gint64 deadline = g_get_monotonic_time() + 3000000;
+    GtkWidget *popover = NULL;
+    for (;;) {
+        popover = find_widget(timeline, GTK_TYPE_POPOVER);
+        GtkWidget *label = popover ? find_widget(popover, GTK_TYPE_LABEL) : NULL;
+        GtkWidget *content = popover ? gtk_popover_get_child(GTK_POPOVER(popover)) : NULL;
+        GtkWidget *picture = popover ? find_widget(popover, GTK_TYPE_PICTURE) : NULL;
+        if (popover && gtk_widget_get_mapped(popover) && label && gtk_widget_get_mapped(label) &&
+            gtk_widget_get_width(label) > 0 && content && gtk_widget_get_width(content) > 0 &&
+            gtk_widget_get_width(content) < 140 && gtk_widget_get_height(content) < 70 &&
+            picture && !gtk_widget_get_mapped(picture) &&
+            g_regex_match_simple(blue ? "^00:0[23]$" : "^00:0[01]$",
+                gtk_label_get_text(GTK_LABEL(label)), 0, 0)) break;
+        if (g_get_monotonic_time() > deadline) g_error("No compact timestamp hover.");
+        poll_host(host);
+    }
+    GtkWidget *content = gtk_popover_get_child(GTK_POPOVER(popover));
+    GtkWidget *picture = find_widget(popover, GTK_TYPE_PICTURE);
+    GtkWidget *spinner = find_widget(popover, GTK_TYPE_SPINNER);
+    g_assert_true(gtk_popover_get_has_arrow(GTK_POPOVER(popover)));
+    g_assert_false(gtk_popover_get_autohide(GTK_POPOVER(popover)));
+    g_assert_false(gtk_widget_get_can_target(popover));
+    g_assert_true(gtk_widget_has_css_class(popover, "time-only"));
+    g_assert_nonnull(picture);
+    g_assert_null(gtk_picture_get_paintable(GTK_PICTURE(picture)));
+    g_assert_false(gtk_widget_get_mapped(picture));
+    g_assert_false(gtk_widget_get_visible(gtk_widget_get_parent(picture)));
+    g_assert_false(gtk_widget_get_visible(spinner));
+    g_assert_false(gtk_spinner_get_spinning(GTK_SPINNER(spinner)));
+    g_assert_cmpint(gtk_widget_get_width(content), <, 140);
+    g_assert_cmpint(gtk_widget_get_height(content), <, 70);
+}
+
+static guint decoder_threads(void)
+{
+    g_autoptr(GDir) tasks = g_dir_open("/proc/self/task", 0, NULL);
+    if (!tasks) return 0;
+    guint count = 0;
+    const char *task;
+    while ((task = g_dir_read_name(tasks))) {
+        g_autofree char *path = g_build_filename("/proc/self/task", task, "comm", NULL);
+        g_autofree char *name = NULL;
+        if (g_file_get_contents(path, &name, NULL, NULL) &&
+            g_str_equal(g_strstrip(name), "preview-decoder")) ++count;
+    }
+    return count;
+}
+
 static void assert_playback_unchanged(PreviewHost *host)
 {
     int paused = 0;
@@ -265,6 +315,19 @@ static void generate_media(const char *ffmpeg, const char *filename)
         g_error("Cannot generate hover fixture: %s; %s", error->message, diagnostic ? diagnostic : "");
 }
 
+static void generate_audio(const char *ffmpeg, const char *filename)
+{
+    char *args[] = {(char *)ffmpeg, "-nostdin", "-v", "error", "-f", "lavfi", "-i",
+        "sine=frequency=440:sample_rate=8000:duration=4", "-c:a", "pcm_s16le", (char *)filename, NULL};
+    int status;
+    g_autofree char *diagnostic = NULL;
+    g_autoptr(GError) error = NULL;
+    g_assert_true(g_spawn_sync(NULL, args, NULL, 0, NULL, NULL, NULL, &diagnostic, &status, &error));
+    g_assert_no_error(error);
+    if (!g_spawn_check_wait_status(status, &error))
+        g_error("Cannot generate audio hover fixture: %s; %s", error->message, diagnostic ? diagnostic : "");
+}
+
 static void remove_tree(const char *path)
 {
     GStatBuf info;
@@ -321,6 +384,8 @@ int main(void)
     g_assert_cmpint(metadata.st_mode & 0777, ==, 0640);
     g_autofree char *source = g_build_filename(directory, "hover Unicode Ω.mp4", NULL);
     generate_media(ffmpeg, source);
+    g_autofree char *audio = g_build_filename(directory, "audio hover.wav", NULL);
+    generate_audio(ffmpeg, audio);
     g_autofree char *tools = g_build_filename(directory, "tools", NULL);
     g_assert_cmpint(g_mkdir(tools, 0700), ==, 0);
     g_autofree char *counter = g_build_filename(directory, "ffmpeg-count", NULL);
@@ -386,8 +451,10 @@ int main(void)
         poll_host(&host);
     }
     hover(host.scale, .25, TRUE);
-    pump_for(&host, 250000);
-    g_assert_null(find_widget(host.scale, GTK_TYPE_POPOVER));
+    wait_clock(&host, host.scale, FALSE);
+    g_assert_cmpuint(decoder_threads(), ==, 0); /* Disabled frames never start a decoder. */
+    hover(host.scale, .75, FALSE);
+    wait_clock(&host, host.scale, TRUE);
     g_assert_cmpuint(call_count(counter), ==, 0);
     assert_playback_unchanged(&host);
     g_assert_true(i18n_save_timeline_previews(TRUE, &error));
@@ -433,13 +500,19 @@ int main(void)
     g_assert_true(find_widget(host.custom, GTK_TYPE_POPOVER) == popover);
     assert_playback_unchanged(&host);
     check_vertical_bounds(&host, host.custom, popover, .90);
+    hover(host.custom, .75, FALSE);
+    wait_color(&host, host.custom, TRUE);
     seek_preview_set_enabled(host.preview, FALSE);
-    wait_hidden(&host, popover);
-    g_assert_true(gtk_widget_get_has_tooltip(host.custom));
+    wait_clock(&host, host.custom, TRUE); /* Changing the preference updates a visible card. */
+    g_assert_false(gtk_widget_get_has_tooltip(host.custom));
     hover(host.custom, .25, TRUE);
     pump_for(&host, 250000);
+    wait_clock(&host, host.custom, FALSE);
     g_assert_cmpuint(call_count(counter), ==, 0);
     assert_playback_unchanged(&host);
+    leave(host.custom);
+    wait_hidden(&host, popover);
+    g_assert_true(gtk_widget_get_has_tooltip(host.custom));
     seek_preview_set_enabled(host.preview, TRUE);
     /* The persistent provider first supplies a keyframe and refines after
      * the target settles. Reload while that work can still be pending. */
@@ -457,13 +530,23 @@ int main(void)
     hover(host.custom, .62, TRUE);
     pump_for(&host, 80000);
     seek_preview_set_enabled(host.preview, FALSE);
-    wait_hidden(&host, popover);
+    wait_clock(&host, host.custom, TRUE);
     pump_for(&host, 200000);
     g_assert_null(preview_texture(host.custom));
-    g_assert_true(gtk_widget_get_has_tooltip(host.custom));
+    wait_clock(&host, host.custom, TRUE); /* A late frame cannot replace the clock. */
+    g_assert_false(gtk_widget_get_has_tooltip(host.custom));
     assert_playback_unchanged(&host);
     g_assert_cmpuint(call_count(counter), ==, 0);
+    const char *load_audio[] = {"loadfile", audio, "replace", NULL};
+    host.loaded = host.restarted = FALSE;
+    g_assert_cmpint(mpv_command_async(host.mpv, 0, load_audio), >=, 0);
+    wait_loaded(&host);
+    g_assert_cmpint(mpv_get_property(host.mpv, "time-pos", MPV_FORMAT_DOUBLE, &host.playback_position), >=, 0);
+    hover(host.custom, .75, TRUE);
+    wait_clock(&host, host.custom, TRUE);
+    assert_playback_unchanged(&host);
     seek_preview_set_enabled(host.preview, TRUE);
+    wait_clock(&host, host.custom, TRUE); /* Audio keeps time even without a video track. */
     hover(host.custom, .80, TRUE);
     pump_for(&host, 80000);
     g_autoptr(GtkEventController) stopped_motion = motion_controller(host.custom);
@@ -483,6 +566,6 @@ int main(void)
     if (path) g_setenv("PATH", path, TRUE); else g_unsetenv("PATH");
     g_assert_no_error(error);
     remove_tree(directory);
-    puts("PASS persistent hover previews: no FFmpeg subprocesses, persisted toggle, decoded red/blue frames, timestamps, shared cache, unchanged playback, latest-target cancellation and shutdown.");
+    puts("PASS persistent hover previews: disabled frames keep compact clock without a decoder, runtime toggles, decoded frames, shared cache, unchanged playback, cancellation and shutdown.");
     return 0;
 }

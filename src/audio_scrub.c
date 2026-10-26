@@ -19,10 +19,10 @@ static const ScrubProperty properties[] = {
 
 struct AudioScrub {
     mpv_handle *mpv;
-    char *saved_property, *saved_expansion;
+    char *saved_property, *saved_expansion, *pause_property, *pause_expansion;
     gboolean held, releasing, stopped, acknowledged, seek_seen;
-    gboolean paused, position_ready, seeking_ready, seeking;
-    guint64 serial, final_request, position_request, seeking_request;
+    gboolean paused, pause_hold_acknowledged, position_ready, seeking_ready, seeking;
+    guint64 serial, final_request, position_request, seeking_request, pause_hold_request;
     double target, position, speed, fps;
     gint64 issued;
     guint recovery;
@@ -44,6 +44,15 @@ static void suppress_gain(AudioScrub *scrub)
     mpv_set_property_async(scrub->mpv, next_command(scrub), "volume-gain", MPV_FORMAT_DOUBLE, &gain);
 }
 
+static void hold_pause(AudioScrub *scrub)
+{
+    int paused = TRUE;
+    scrub->pause_hold_acknowledged = FALSE;
+    scrub->pause_hold_request = next_command(scrub);
+    if (mpv_set_property_async(scrub->mpv, scrub->pause_hold_request, "pause", MPV_FORMAT_FLAG, &paused) < 0)
+        audio_scrub_cancel(scrub);
+}
+
 static void clear_final_seek(AudioScrub *scrub)
 {
     if (scrub->recovery) { g_source_remove(scrub->recovery); scrub->recovery = 0; }
@@ -58,11 +67,17 @@ void audio_scrub_cancel(AudioScrub *scrub)
     clear_final_seek(scrub);
     if (!scrub->held) return;
     scrub->held = FALSE;
+    scrub->pause_hold_request = 0;
+    scrub->pause_hold_acknowledged = FALSE;
     /* The snapshot lives in the core, so cancel/free can restore even before
      * any client property reply was dispatched. These commands share its FIFO
      * with begin's capture and suppression; no render-thread read is needed. */
     const char *restore[] = {"expand-properties", "set", "volume-gain", scrub->saved_expansion, NULL};
     command(scrub, restore);
+    /* Restore gain before resuming playback. A held frame remains paused
+     * through every drag seek, including the final exact seek. */
+    const char *resume[] = {"expand-properties", "set", "pause", scrub->pause_expansion, NULL};
+    command(scrub, resume);
 }
 
 static void maybe_restore(AudioScrub *scrub)
@@ -115,13 +130,16 @@ AudioScrub *audio_scrub_new(mpv_handle *mpv)
     static gint instance;
     AudioScrub *scrub = g_new0(AudioScrub, 1);
     scrub->mpv = mpv; scrub->speed = 1; scrub->fps = 25;
-    scrub->saved_property = g_strdup_printf("user-data/mpv-gtk-scrub-gain-%ld-%u",
-        (long)getpid(), (guint)g_atomic_int_add(&instance, 1));
+    guint token = (guint)g_atomic_int_add(&instance, 1);
+    scrub->saved_property = g_strdup_printf("user-data/mpv-gtk-scrub-gain-%ld-%u", (long)getpid(), token);
+    scrub->pause_property = g_strdup_printf("user-data/mpv-gtk-scrub-pause-%ld-%u", (long)getpid(), token);
     /* Restore only while our attenuation remains effective, so a user's or
      * new file's unobserved gain edit wins too. volume-gain's print format is
      * one decimal; raw user-data would JSON-quote the captured numeric string. */
     scrub->saved_expansion = g_strdup_printf(
         "${?volume-gain==-150.0:${%s}}${!volume-gain==-150.0:${=volume-gain}}", scrub->saved_property);
+    scrub->pause_expansion = g_strdup_printf(
+        "${?pause==yes:${%s}}${!pause==yes:${=pause}}", scrub->pause_property);
     for (guint i = 0; i < G_N_ELEMENTS(properties); ++i)
         mpv_observe_property(mpv, SCRUB_BASE + i, properties[i].name, properties[i].format);
     return scrub;
@@ -135,7 +153,10 @@ void audio_scrub_begin(AudioScrub *scrub)
     scrub->held = TRUE;
     const char *capture[] = {"expand-properties", "set", scrub->saved_property, "${=volume-gain}", NULL};
     command(scrub, capture);
+    const char *capture_pause[] = {"expand-properties", "set", scrub->pause_property, "${=pause}", NULL};
+    command(scrub, capture_pause);
     suppress_gain(scrub);
+    hold_pause(scrub);
 }
 
 void audio_scrub_end(AudioScrub *scrub, double position)
@@ -179,7 +200,16 @@ gboolean audio_scrub_handle_event(AudioScrub *scrub, const mpv_event *event)
                                         MPV_FORMAT_DOUBLE, &gain);
                 suppress_gain(scrub);
             }
-        } else if (index == 1 && property->format == MPV_FORMAT_FLAG) scrub->paused = *(int *)property->data;
+        } else if (index == 1 && property->format == MPV_FORMAT_FLAG) {
+            scrub->paused = *(int *)property->data;
+            if (scrub->held && scrub->pause_hold_acknowledged && !scrub->paused) {
+                /* A Play request during dragging takes effect on release;
+                 * our own forced pause notifications never replace intent. */
+                const char *remember_play[] = {"set", scrub->pause_property, "no", NULL};
+                command(scrub, remember_play);
+                hold_pause(scrub);
+            }
+        }
         else if (property->format == MPV_FORMAT_DOUBLE) {
             double value = *(double *)property->data;
             if (isfinite(value) && value > 0) {
@@ -198,7 +228,13 @@ gboolean audio_scrub_handle_event(AudioScrub *scrub, const mpv_event *event)
         return TRUE;
     }
     if (event->event_id == MPV_EVENT_SET_PROPERTY_REPLY && event->reply_userdata >= SCRUB_COMMAND_BASE &&
-        event->reply_userdata < SCRUB_QUERY_BASE) return TRUE;
+        event->reply_userdata < SCRUB_QUERY_BASE) {
+        if (event->reply_userdata == scrub->pause_hold_request) {
+            if (event->error < 0) audio_scrub_cancel(scrub);
+            else scrub->pause_hold_acknowledged = TRUE;
+        }
+        return TRUE;
+    }
     if (event->event_id == MPV_EVENT_GET_PROPERTY_REPLY && event->reply_userdata >= SCRUB_QUERY_BASE &&
         event->reply_userdata < SCRUB_LIMIT) {
         const mpv_event_property *property = event->data;
@@ -230,5 +266,6 @@ void audio_scrub_free(AudioScrub *scrub)
     audio_scrub_cancel(scrub);
     scrub->stopped = TRUE;
     for (guint i = 0; i < G_N_ELEMENTS(properties); ++i) mpv_unobserve_property(scrub->mpv, SCRUB_BASE + i);
-    g_free(scrub->saved_property); g_free(scrub->saved_expansion); g_free(scrub);
+    g_free(scrub->saved_property); g_free(scrub->saved_expansion);
+    g_free(scrub->pause_property); g_free(scrub->pause_expansion); g_free(scrub);
 }

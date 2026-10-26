@@ -8,14 +8,15 @@ visible bar keeps its size. The card's arrow points to the hovered position.
 
 Toggle **Timeline hover previews** in **Settings → Interface**. The preference
 is enabled by default, applies immediately, and is saved as `timeline-previews`
-in `interface.conf`. Turning it off hides the card, cancels pending work, and
-releases cached thumbnails.
+in `interface.conf`. Turning it off cancels frame decoding and releases cached
+thumbnails. A compact timestamp bubble with the same arrow remains available.
 
 ## Prototype scope
 
 Frames are available for local video files using the selected video stream.
 A separate, headless libmpv decoder supplies frames. Network streams or failed
-extraction fall back to the timestamp. Audio files and cover images do not show previews.
+extraction fall back to the timestamp. Audio files and cover images show only
+the timestamp.
 The card displays the source video rather than the player's video filters.
 
 Thumbnail pixels fit inside 160 × 90 while preserving their display aspect

@@ -14,9 +14,10 @@ the preceding video; returning to video restores that mode.
 The trim timeline highlights the selected interval and marks video keyframes.
 Click or drag it to seek. The playback counter shows milliseconds and mpv's
 estimated frame number.
-During a timeline drag, video updates immediately while audio stays silent.
-Sound returns at the released position; the playing/paused state, mute,
-volume, and selected audio track are preserved.
+During a timeline drag, video follows the selected position and stays on that
+frame while the pointer is held still. Audio stays silent. Releasing the
+pointer restores the previous playing/paused state at the final position;
+mute, volume, and the selected audio track are preserved.
 Both selection edges animate over 200 ms with cubic ease-out, matching the
 original script. Repeated edits continue smoothly from the current drawing.
 

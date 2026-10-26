@@ -46,8 +46,10 @@ from unfinished interface work. Item 16 is tentative.
 - [x] Show a frame thumbnail and timestamp on hover (local-video prototype).
 - [x] Reuse a persistent native decoder with low-resolution keyframe previews and idle-time exact refinement.
 - [x] Enable or disable previews in Interface settings, with immediate application and persistence.
+- [x] Keep a compact timestamp bubble available when frame previews are disabled.
 - [x] Show previews from an invisible area around the bar, with a triangle pointing to the hover position.
 - [x] Keep audio silent during timeline dragging and restore it after the final seek.
+- [x] Hold playback on the selected frame until the pointer is released, then restore the previous play/pause state.
 - [ ] Add a dialog for seeking to a specified hh:mm:ss position.
 
 ## 8. Bookmarks
