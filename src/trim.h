@@ -14,6 +14,7 @@ typedef struct {
     GtkLabel *time;
     GtkOverlay *video;
     const char *config_path;
+    const char *runtime_directory;
     void (*seek_to)(double seconds, gpointer data);
     void (*scrub_begin)(gpointer data);
     void (*scrub_end)(double seconds, gpointer data);

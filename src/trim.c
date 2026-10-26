@@ -26,7 +26,7 @@ typedef struct {
 struct TrimMode {
     TrimHost host;
     TrimBackend *backend;
-    char *config_path;
+    char *config_path, *runtime_directory;
     GtkWidget *button, *meta, *canvas, *group, *entries[2], *keys[2];
     GtkWidget *play_icon, *exports[2], *progress, *progress_label, *length;
     GtkWidget *audio_button, *audio_popover;
@@ -805,7 +805,7 @@ static void load_backend(TrimMode *t)
     };
     for (guint i = 0; i < G_N_ELEMENTS(properties); ++i)
         mpv_observe_property(t->host.mpv, TRIM_OBSERVE_BASE + i, properties[i], MPV_FORMAT_NODE);
-    t->backend = trim_backend_new(t->host.mpv, t->config_path);
+    t->backend = trim_backend_new_with_runtime(t->host.mpv, t->config_path, t->runtime_directory);
     t->ready = t->backend != NULL;
     if (t->ready && t->requested >= 0)
         trim_backend_set_enabled(t->backend, t->requested != 0);
@@ -826,6 +826,8 @@ TrimMode *trim_mode_new(const TrimHost *host)
     t->requested = -1;
     t->frame = -1;
     t->config_path = g_strdup(host->config_path);
+    t->runtime_directory = g_strdup(host->runtime_directory);
+    t->host.runtime_directory = t->runtime_directory;
     t->keyframes = g_array_new(FALSE, FALSE, sizeof(double));
     t->audio_choices = g_ptr_array_new_with_free_func(audio_choice_free);
     t->audio_file_serial = -1;
@@ -1098,6 +1100,6 @@ void trim_mode_free(TrimMode *t)
     g_ptr_array_unref(t->audio_choices);
     if (t->marks) cairo_path_destroy(t->marks);
     g_free(t->submitted[0]); g_free(t->submitted[1]);
-    g_free(t->config_path); g_free(t->phase);
+    g_free(t->config_path); g_free(t->runtime_directory); g_free(t->phase);
     g_free(t);
 }

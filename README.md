@@ -44,10 +44,14 @@ Use `make uninstall` to remove the application while keeping your settings.
 
 ## Configuration
 
-`mpv.conf`, `input.conf`, and `interface.conf` live beside the executable:
-in `build/` when running locally, or `~/.local/share/mpv-gtk/` after installation.
-Updates preserve existing settings. The Misc settings section includes buttons to
-open `mpv.conf` and `input.conf`.
+Configuration files and scripts live in `~/.config/mpv-gtk/`
+(`$XDG_CONFIG_HOME/mpv-gtk` when set), including `mpv.conf`, `input.conf`,
+and `interface.conf`. Saved playback state and installed resources remain
+in `~/.local/share/mpv-gtk/`.
+The first launch moves legacy configs and scripts without overwriting existing
+configuration files. The Misc settings section opens `mpv.conf` and `input.conf`.
+`MPV_GTK_CONFIG_FILE` selects an alternative config file; related settings and
+saved state then use its parent directory for isolated runs.
 
 ## Credits
 

@@ -16,6 +16,26 @@ static char *read_file(const char *path)
     return contents;
 }
 
+/* Only used for the private tree created by this check. lstat prevents the
+ * copied launcher symlink from turning cleanup into an external traversal. */
+static void remove_fixture_tree(const char *path)
+{
+    GStatBuf status;
+    g_assert_cmpint(g_lstat(path, &status), ==, 0);
+    if (!S_ISDIR(status.st_mode)) {
+        g_assert_cmpint(g_unlink(path), ==, 0);
+        return;
+    }
+    g_autoptr(GDir) entries = g_dir_open(path, 0, NULL);
+    g_assert_nonnull(entries);
+    const char *name;
+    while ((name = g_dir_read_name(entries))) {
+        g_autofree char *child = g_build_filename(path, name, NULL);
+        remove_fixture_tree(child);
+    }
+    g_assert_cmpint(g_rmdir(path), ==, 0);
+}
+
 static void save_setting(PlayerConfig *config, const char *name, const char *value)
 {
     g_autoptr(GError) error = NULL;
@@ -23,12 +43,13 @@ static void save_setting(PlayerConfig *config, const char *name, const char *val
     g_assert_no_error(error);
 }
 
-static void probe_executable(const char *binary, const char *legacy_dir,
-                              const char *expected_path)
+static void probe_executable(const char *binary, const char *config_home,
+                              const char *data_home, const char *expected_path)
 {
     g_auto(GStrv) environment = g_get_environ();
     environment = g_environ_unsetenv(environment, "MPV_GTK_CONFIG_FILE");
-    environment = g_environ_setenv(environment, "XDG_CONFIG_HOME", legacy_dir, TRUE);
+    environment = g_environ_setenv(environment, "XDG_CONFIG_HOME", config_home, TRUE);
+    environment = g_environ_setenv(environment, "XDG_DATA_HOME", data_home, TRUE);
     char *arguments[] = {(char *)binary, "--probe", NULL};
     g_autofree char *output = NULL;
     g_autofree char *errors = NULL;
@@ -408,17 +429,21 @@ int main(int argc, char **argv)
     g_assert_cmpmem(unchanged, unchanged_size, binary, sizeof(binary) - 1);
     config_clear(&config);
 
-    /* Execute a real copied binary through a symlink. Config belongs beside
-     * /proc/self/exe, rather than the symlink or the current working directory. */
+    /* A copied executable's sibling settings migrate into the private XDG
+     * config directory, independently of its launcher or working directory.
+     * Both XDG roots are isolated so no default-path probe can touch user data. */
     g_autofree char *actual = g_build_filename(temporary, "actual", NULL);
-    g_autofree char *legacy = g_build_filename(temporary, "legacy", NULL);
-    g_autofree char *legacy_app = g_build_filename(legacy, "mpv-gtk", NULL);
-    g_autofree char *legacy_file = g_build_filename(legacy_app, "mpv.conf", NULL);
-    g_autofree char *legacy_input = g_build_filename(legacy_app, "input.conf", NULL);
+    g_autofree char *config_home = g_build_filename(temporary, "xdg-config", NULL);
+    g_autofree char *data_home = g_build_filename(temporary, "xdg-data", NULL);
+    g_autofree char *legacy_file = g_build_filename(actual, "mpv.conf", NULL);
+    g_autofree char *legacy_input = g_build_filename(actual, "input.conf", NULL);
     g_assert_cmpint(g_mkdir_with_parents(actual, 0700), ==, 0);
-    g_assert_cmpint(g_mkdir_with_parents(legacy_app, 0700), ==, 0);
-    g_assert_true(g_file_set_contents(legacy_file, "# migrated\nhwdec=no\n", -1, &error));
-    g_assert_true(g_file_set_contents(legacy_input, "# migrated keys\nCtrl+x cycle pause\n", -1, &error));
+    g_assert_cmpint(g_mkdir_with_parents(config_home, 0700), ==, 0);
+    g_assert_cmpint(g_mkdir_with_parents(data_home, 0700), ==, 0);
+    write_fixture(legacy_file, "# migrated\nhwdec=no\n");
+    write_fixture(legacy_input, "# migrated keys\nCtrl+x cycle pause\n");
+    g_assert_cmpint(g_chmod(legacy_file, 0640), ==, 0);
+    g_assert_cmpint(g_chmod(legacy_input, 0604), ==, 0);
     g_autofree char *self = g_file_read_link("/proc/self/exe", &error);
     g_autofree char *executable = NULL;
     gsize executable_size;
@@ -428,34 +453,43 @@ int main(int argc, char **argv)
         G_FILE_SET_CONTENTS_CONSISTENT, 0700, &error));
     g_autofree char *alias = g_build_filename(temporary, "launcher", NULL);
     g_assert_cmpint(symlink(copied, alias), ==, 0);
-    g_autofree char *real_config = g_build_filename(actual, "mpv.conf", NULL);
-    g_autofree char *real_input = g_build_filename(actual, "input.conf", NULL);
-    probe_executable(alias, legacy, real_config);
+    g_autofree char *config_directory = g_build_filename(config_home, "mpv-gtk", NULL);
+    g_autofree char *real_config = g_build_filename(config_directory, "mpv.conf", NULL);
+    g_autofree char *real_input = g_build_filename(config_directory, "input.conf", NULL);
+    probe_executable(alias, config_home, data_home, real_config);
     g_autofree char *migrated = read_file(real_config);
     g_assert_cmpstr(migrated, ==, "# migrated\nhwdec=no\n");
     g_autofree char *migrated_input = read_file(real_input);
     g_assert_cmpstr(migrated_input, ==, "# migrated keys\nCtrl+x cycle pause\n");
-    g_assert_true(g_file_set_contents(real_config, "# keep existing\n", -1, &error));
-    g_assert_true(g_file_set_contents(real_input, "# keep existing keys\nm cycle pause\n", -1, &error));
-    probe_executable(alias, legacy, real_config);
+    g_assert_cmpint(g_stat(real_config, &mode), ==, 0);
+    g_assert_cmpint(mode.st_mode & 0777, ==, 0640);
+    g_assert_cmpint(g_stat(real_input, &mode), ==, 0);
+    g_assert_cmpint(mode.st_mode & 0777, ==, 0604);
+    g_autofree char *trim_config = g_build_filename(config_directory, "script-opts", "trim-mode.conf", NULL);
+    g_assert_true(g_file_test(trim_config, G_FILE_TEST_IS_REGULAR));
+
+    write_fixture(real_config, "# keep existing\n");
+    write_fixture(real_input, "# keep existing keys\nm cycle pause\n");
+    write_fixture(legacy_file, "# conflicting legacy configuration\n");
+    write_fixture(legacy_input, "# conflicting legacy bindings\n");
+    g_assert_cmpint(g_chmod(real_config, 0604), ==, 0);
+    g_assert_cmpint(g_chmod(real_input, 0640), ==, 0);
+    probe_executable(alias, config_home, data_home, real_config);
     g_autofree char *kept = read_file(real_config);
     g_assert_cmpstr(kept, ==, "# keep existing\n");
     g_autofree char *kept_input = read_file(real_input);
     g_assert_cmpstr(kept_input, ==, "# keep existing keys\nm cycle pause\n");
-    g_assert_cmpint(g_unlink(alias), ==, 0);
-    g_assert_cmpint(g_unlink(copied), ==, 0);
-    g_assert_cmpint(g_unlink(real_config), ==, 0);
-    g_assert_cmpint(g_unlink(real_input), ==, 0);
-    g_assert_cmpint(g_unlink(legacy_file), ==, 0);
-    g_assert_cmpint(g_unlink(legacy_input), ==, 0);
-    g_assert_cmpint(g_rmdir(legacy_app), ==, 0);
-    g_assert_cmpint(g_rmdir(legacy), ==, 0);
-    g_assert_cmpint(g_rmdir(actual), ==, 0);
+    g_assert_cmpint(g_stat(real_config, &mode), ==, 0);
+    g_assert_cmpint(mode.st_mode & 0777, ==, 0604);
+    g_assert_cmpint(g_stat(real_input, &mode), ==, 0);
+    g_assert_cmpint(mode.st_mode & 0777, ==, 0640);
+    g_autofree char *conflicting_config = read_file(legacy_file);
+    g_autofree char *conflicting_input = read_file(legacy_input);
+    g_assert_cmpstr(conflicting_config, ==, "# conflicting legacy configuration\n");
+    g_assert_cmpstr(conflicting_input, ==, "# conflicting legacy bindings\n");
     test_renderer_migration(temporary);
     test_list_settings(temporary);
-    g_assert_cmpint(g_unlink(path), ==, 0);
-    g_assert_cmpint(g_unlink(input_path), ==, 0);
-    g_assert_cmpint(g_rmdir(temporary), ==, 0);
+    remove_fixture_tree(temporary);
     g_assert_no_error(error);
     puts("PASS config: defaults/bindings, comments/profiles, renderer migration, atomic batches, "
          "complete/empty string lists, legacy aliases, permissions and failure preservation");

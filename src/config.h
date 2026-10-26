@@ -6,10 +6,15 @@
 typedef struct {
     char *path;
     char *input_path;
+    char *runtime_dir;
 } PlayerConfig;
 
-/* Initialize a zeroed structure. An existing config is never replaced. */
+/* Default settings use XDG_CONFIG_HOME/mpv-gtk. Explicit paths remain isolated;
+ * existing settings are never replaced by defaults or legacy migration. */
 gboolean config_init(PlayerConfig *config, GError **error);
+/* The caller owns the result. Default runtime data remains in
+ * XDG_DATA_HOME/mpv-gtk; an explicit config uses its own parent directory. */
+char *config_runtime_directory(const PlayerConfig *config);
 gboolean config_set(PlayerConfig *config, const char *name, const char *value,
                     GError **error);
 /* Commit all options in one atomic replacement, or leave the file unchanged. */

@@ -340,14 +340,15 @@ static void update_shortcuts(TrimBackend *b)
     }
 }
 
-static void load_options(TrimBackend *b, const char *config_path)
+static void load_options(TrimBackend *b, const char *config_path, const char *runtime_directory)
 {
     b->ffmpeg_path = g_strdup("ffmpeg");
     b->ffprobe_path = g_strdup("ffprobe");
     b->open_copy = b->open_replace = TRUE;
     g_autofree char *directory = g_path_get_dirname(config_path);
     g_autofree char *filename = g_build_filename(directory, "script-opts", "trim-mode.conf", NULL);
-    b->state_path = g_build_filename(directory, "trim-mode-state.json", NULL);
+    b->state_path = g_build_filename(runtime_directory ? runtime_directory : directory,
+                                   "trim-mode-state.json", NULL);
     g_autofree char *contents = NULL;
     if (g_file_get_contents(filename, &contents, NULL, NULL)) {
         g_auto(GStrv) lines = g_strsplit(contents, "\n", -1);
@@ -1067,6 +1068,12 @@ static void create_compat_client(TrimBackend *b)
 
 TrimBackend *trim_backend_new(mpv_handle *mpv, const char *config_path)
 {
+    return trim_backend_new_with_runtime(mpv, config_path, NULL);
+}
+
+TrimBackend *trim_backend_new_with_runtime(mpv_handle *mpv, const char *config_path,
+                                            const char *runtime_directory)
+{
     g_return_val_if_fail(mpv != NULL && config_path != NULL, NULL);
     TrimBackend *b = g_new0(TrimBackend, 1);
     b->references = 1;
@@ -1077,7 +1084,7 @@ TrimBackend *trim_backend_new(mpv_handle *mpv, const char *config_path)
     b->playback_speed = 1; b->playback_fps = 25;
     b->keyframes = g_array_new(FALSE, FALSE, sizeof(double));
     b->audio_tracks = g_ptr_array_new_with_free_func(audio_track_free);
-    load_options(b, config_path);
+    load_options(b, config_path, runtime_directory);
     b->ever_enabled = b->enabled;
     b->exporter = trim_export_new(mpv);
     create_compat_client(b);

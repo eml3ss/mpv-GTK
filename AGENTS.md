@@ -42,8 +42,10 @@
 
 ## Configuration and installation
 
-- Keep mpv.conf, input.conf, and interface.conf beside the real executable.
-  The default installed directory is ~/.local/share/mpv-gtk/.
+- Keep mpv.conf, input.conf, interface.conf, scripts, and script options in
+  ~/.config/mpv-gtk/ (respect XDG_CONFIG_HOME). Keep watch-later and Trim runtime
+  state, installed binaries, resources, and licenses in ~/.local/share/mpv-gtk/
+  (respect XDG_DATA_HOME). Explicit MPV_GTK_CONFIG_FILE overrides stay isolated.
 - Preserve existing configs, custom bindings, comments, profiles, and file
   permissions during changes and installation. Never replace live configs
   with repository defaults or an older backup.

@@ -1578,8 +1578,8 @@ static void build_misc(Preferences *p)
     const char *filenames[] = {"mpv.conf", "input.conf"};
     const char *labels[] = {tr("Открыть mpv.conf"), tr("Открыть input.conf")};
     const char *descriptions[] = {
-        tr("Настройки mpv и профили. Файл находится рядом с плеером."),
-        tr("Пользовательские сочетания клавиш mpv. Файл находится рядом с плеером.")
+        tr("Настройки mpv и профили. Файл находится в папке настроек mpv-gtk."),
+        tr("Пользовательские сочетания клавиш mpv. Файл находится в папке настроек mpv-gtk.")
     };
     for (guint i = 0; i < G_N_ELEMENTS(filenames); ++i) {
         GtkWidget *button = gtk_button_new_with_label(labels[i]);

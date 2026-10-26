@@ -1,6 +1,8 @@
 #define _GNU_SOURCE
 #include "config.h"
 
+#include <gio/gio.h>
+
 #include <errno.h>
 #include <fcntl.h>
 #include <glib/gstdio.h>
@@ -10,7 +12,7 @@
 #include <unistd.h>
 
 static const char defaults[] =
-    "# mpv GTK: settings next to the executable.\n"
+    "# mpv GTK: playback settings.\n"
     "# Settings changed in the player are saved here; other options are preserved.\n"
     "vo=libmpv\n"
     "gpu-api=auto\n"
@@ -26,7 +28,7 @@ static const char defaults[] =
     "volume=50\n";
 
 static const char input_defaults[] =
-    "# mpv GTK: custom input bindings next to the executable.\n"
+    "# mpv GTK: custom input bindings.\n"
     "# Remove the leading # to enable an example, then restart the player.\n"
     "# Custom bindings take priority over GTK player shortcuts for the same key.\n"
     "# p cycle pause\n"
@@ -73,8 +75,13 @@ static gboolean write_config(const char *path, const char *contents, GError **er
         G_FILE_SET_CONTENTS_CONSISTENT | G_FILE_SET_CONTENTS_DURABLE, mode, error);
 }
 
-static gboolean seed_file(const char *path, const char *filename,
-                           const char *seed, gboolean migrate, GError **error)
+static gboolean path_exists(const char *path)
+{
+    GStatBuf status;
+    return g_lstat(path, &status) == 0;
+}
+
+static gboolean seed_file(const char *path, const char *seed, GError **error)
 {
     g_autofree char *contents = NULL;
     g_autoptr(GError) read_error = NULL;
@@ -85,38 +92,158 @@ static gboolean seed_file(const char *path, const char *filename,
         g_propagate_error(error, g_steal_pointer(&read_error));
         return FALSE;
     }
-    g_autofree char *legacy = migrate
-        ? g_build_filename(g_get_user_config_dir(), "mpv-gtk", filename, NULL) : NULL;
-    if (legacy && g_file_test(legacy, G_FILE_TEST_EXISTS)) {
-        g_clear_error(&read_error);
-        if (!g_file_get_contents(legacy, &contents, NULL, &read_error)) {
-            g_propagate_error(error, g_steal_pointer(&read_error));
+    return write_config(path, seed, error);
+}
+
+static gboolean is_config_resource(const char *relative)
+{
+    while (*relative == '/') ++relative;
+    g_autofree char *name = g_strndup(relative, strcspn(relative, "/"));
+    const char *const directories[] = {"script-opts", "scripts", "profiles", "fonts", "shaders",
+        "mpv.conf.d", "input.conf.d", NULL};
+    for (guint i = 0; directories[i]; ++i)
+        if (g_str_equal(name, directories[i])) return TRUE;
+    return g_str_has_suffix(name, ".conf") || g_str_has_suffix(name, ".ini") ||
+        g_str_has_suffix(name, ".lua") || g_str_has_suffix(name, ".js");
+}
+
+static gboolean migrate_entry(const char *source, const char *target,
+                               const char *old_root, const char *new_root,
+                               GError **error)
+{
+    GStatBuf source_status, target_status;
+    if (g_lstat(source, &source_status) != 0)
+        return errno == ENOENT || file_error(error, source);
+    gboolean existing = g_lstat(target, &target_status) == 0;
+    if (!existing && errno != ENOENT) return file_error(error, target);
+    if (existing && (!S_ISDIR(source_status.st_mode) || !S_ISDIR(target_status.st_mode)))
+        return TRUE;
+    if (existing && source_status.st_dev == target_status.st_dev &&
+        source_status.st_ino == target_status.st_ino)
+        return TRUE;
+
+    /* Moving a relative symbolic link to a different directory would change
+     * its referent. Preserve the original referent, mapping config-local
+     * links into the new configuration tree. Never follow directory links. */
+    if (S_ISLNK(source_status.st_mode)) {
+        g_autofree char *link = g_file_read_link(source, error);
+        if (!link) return FALSE;
+        g_autofree char *parent = g_path_get_dirname(source);
+        g_autofree char *absolute = g_canonicalize_filename(link, parent);
+        gsize length = strlen(old_root);
+        g_autofree char *mapped = g_str_has_prefix(absolute, old_root) &&
+            (absolute[length] == '/' || absolute[length] == '\0') &&
+            is_config_resource(absolute + length)
+            ? g_strconcat(new_root, absolute + length, NULL) : g_strdup(absolute);
+        g_autoptr(GFile) destination = g_file_new_for_path(target);
+        g_autoptr(GError) move_error = NULL;
+        if (!g_file_make_symbolic_link(destination, mapped, NULL, &move_error)) {
+            if (g_error_matches(move_error, G_IO_ERROR, G_IO_ERROR_EXISTS)) return TRUE;
+            g_propagate_error(error, g_steal_pointer(&move_error));
             return FALSE;
         }
+        return g_unlink(source) == 0 || file_error(error, source);
     }
-    return write_config(path, contents ? contents : seed, error);
+
+    if (!S_ISDIR(source_status.st_mode)) {
+        g_autoptr(GFile) from = g_file_new_for_path(source);
+        g_autoptr(GFile) to = g_file_new_for_path(target);
+        g_autoptr(GError) move_error = NULL;
+        if (g_file_move(from, to, G_FILE_COPY_ALL_METADATA | G_FILE_COPY_NOFOLLOW_SYMLINKS,
+                        NULL, NULL, NULL, &move_error))
+            return TRUE;
+        if (g_error_matches(move_error, G_IO_ERROR, G_IO_ERROR_EXISTS)) return TRUE;
+        g_propagate_error(error, g_steal_pointer(&move_error));
+        return FALSE;
+    }
+    gboolean created = FALSE;
+    if (!existing) {
+        if (g_mkdir(target, 0700) == 0) created = TRUE;
+        else if (errno != EEXIST) return file_error(error, target);
+        if (g_lstat(target, &target_status) != 0) return file_error(error, target);
+        if (!S_ISDIR(target_status.st_mode)) return TRUE;
+    }
+    /* Traverse even on the same filesystem so relative links in nested
+     * config folders retain their referents after relocation. */
+    g_autoptr(GDir) children = g_dir_open(source, 0, error);
+    if (!children) return FALSE;
+    const char *name;
+    while ((name = g_dir_read_name(children))) {
+        g_autofree char *old_path = g_build_filename(source, name, NULL);
+        g_autofree char *new_path = g_build_filename(target, name, NULL);
+        if (!migrate_entry(old_path, new_path, old_root, new_root, error)) return FALSE;
+    }
+    g_clear_pointer(&children, g_dir_close);
+    if (created) {
+        struct timespec times[] = {source_status.st_atim, source_status.st_mtim};
+        if (g_chmod(target, source_status.st_mode & 0777) != 0 ||
+            utimensat(AT_FDCWD, target, times, AT_SYMLINK_NOFOLLOW) != 0)
+            return file_error(error, target);
+    }
+    /* Conflicting legacy files are retained rather than replacing XDG data. */
+    if (g_rmdir(source) != 0 && errno != ENOTEMPTY && errno != EEXIST)
+        return file_error(error, source);
+    return TRUE;
+}
+
+static gboolean migrate_legacy_directory(const char *source, const char *target,
+                                          gboolean application_directory, GError **error)
+{
+    const char *const names[] = {"mpv.conf", "input.conf", "interface.conf", "script-opts",
+        "scripts", "profiles", "fonts", "shaders", "mpv.conf.d", "input.conf.d", NULL};
+    if (g_strcmp0(source, target) == 0) return TRUE;
+    GStatBuf old_status, new_status;
+    if (g_stat(source, &old_status) != 0)
+        return errno == ENOENT || file_error(error, source);
+    if (!S_ISDIR(old_status.st_mode)) return TRUE;
+    if (g_stat(target, &new_status) == 0 && old_status.st_dev == new_status.st_dev &&
+        old_status.st_ino == new_status.st_ino) return TRUE;
+    gboolean has_settings = FALSE;
+    for (guint i = 0; names[i]; ++i) {
+        g_autofree char *path = g_build_filename(source, names[i], NULL);
+        has_settings |= path_exists(path);
+    }
+    if (!has_settings && !application_directory) return TRUE;
+    for (guint i = 0; names[i]; ++i) {
+        g_autofree char *from = g_build_filename(source, names[i], NULL);
+        g_autofree char *to = g_build_filename(target, names[i], NULL);
+        if (!migrate_entry(from, to, source, target, error)) return FALSE;
+    }
+    /* Include custom profile/include files without moving executables,
+     * libraries, licenses, caches, watch-later data or Trim Mode state. */
+    g_autoptr(GDir) files = g_dir_open(source, 0, error);
+    if (!files) return FALSE;
+    const char *name;
+    while ((name = g_dir_read_name(files))) {
+        if (!is_config_resource(name)) continue;
+        g_autofree char *from = g_build_filename(source, name, NULL);
+        g_autofree char *to = g_build_filename(target, name, NULL);
+        if (!migrate_entry(from, to, source, target, error)) return FALSE;
+    }
+    return TRUE;
 }
 
 gboolean config_init(PlayerConfig *config, GError **error)
 {
     g_return_val_if_fail(config != NULL, FALSE);
-    if (config->path && config->input_path)
+    if (config->path && config->input_path) {
+        if (!config->runtime_dir) config->runtime_dir = g_path_get_dirname(config->path);
         return TRUE;
+    }
     const char *override = g_getenv("MPV_GTK_CONFIG_FILE");
+    gboolean default_paths = !config->path && !config->input_path && (!override || !*override);
     if (!config->path) {
-        if (override && *override) {
+        if (override && *override)
             config->path = g_canonicalize_filename(override, NULL);
-        } else {
-            g_autofree char *executable = g_file_read_link("/proc/self/exe", error);
-            if (!executable)
-                return FALSE;
-            g_autofree char *directory = g_path_get_dirname(executable);
-            config->path = g_build_filename(directory, "mpv.conf", NULL);
-        }
+        else
+            config->path = g_build_filename(g_get_user_config_dir(), "mpv-gtk", "mpv.conf", NULL);
     }
     g_autofree char *directory = g_path_get_dirname(config->path);
     if (!config->input_path)
         config->input_path = g_build_filename(directory, "input.conf", NULL);
+    if (!config->runtime_dir)
+        config->runtime_dir = default_paths
+            ? g_build_filename(g_get_user_data_dir(), "mpv-gtk", NULL) : g_strdup(directory);
     if (g_mkdir_with_parents(directory, 0700) < 0) {
         file_error(error, directory);
         config_clear(config);
@@ -127,13 +254,42 @@ gboolean config_init(PlayerConfig *config, GError **error)
         config_clear(config);
         return FALSE;
     }
-    gboolean migrate = !override || !*override;
-    gboolean result = seed_file(config->path, "mpv.conf", defaults, migrate, error) &&
-                      seed_file(config->input_path, "input.conf", input_defaults, migrate, error);
+    gboolean result = TRUE;
+    if (default_paths) {
+        g_autofree char *legacy = g_build_filename(g_get_user_data_dir(), "mpv-gtk", NULL);
+        result = migrate_legacy_directory(legacy, directory, TRUE, error);
+        g_autofree char *executable = result ? g_file_read_link("/proc/self/exe", NULL) : NULL;
+        g_autofree char *portable = executable ? g_path_get_dirname(executable) : NULL;
+        if (result && portable && g_strcmp0(portable, legacy) != 0)
+            result = migrate_legacy_directory(portable, directory, FALSE, error);
+    }
+    if (result)
+        result = seed_file(config->path, defaults, error) &&
+                 seed_file(config->input_path, input_defaults, error);
+    if (result && default_paths) {
+        g_autofree char *options = g_build_filename(directory, "script-opts", NULL);
+        g_autofree char *trim = g_build_filename(options, "trim-mode.conf", NULL);
+        if (g_mkdir_with_parents(options, 0700) != 0)
+            result = file_error(error, options);
+        else
+            result = seed_file(trim,
+                "# Remember whether Trim Mode was enabled between launches.\n"
+                "remember=no\n\n"
+                "# Open the exported copy or replacement in this player.\n"
+                "open-copy=yes\nopen-replace=yes\n\n"
+                "# Optional paths to the FFmpeg tools.\n"
+                "ffmpeg_path=ffmpeg\nffprobe_path=ffprobe\n", error);
+    }
     close(lock);
-    if (!result)
-        config_clear(config);
+    if (!result) config_clear(config);
     return result;
+}
+
+char *config_runtime_directory(const PlayerConfig *config)
+{
+    if (config && config->runtime_dir) return g_strdup(config->runtime_dir);
+    if (config && config->path) return g_path_get_dirname(config->path);
+    return g_build_filename(g_get_user_data_dir(), "mpv-gtk", NULL);
 }
 
 static const char *skip_space(const char *text)
@@ -550,5 +706,6 @@ void config_clear(PlayerConfig *config)
     if (config) {
         g_clear_pointer(&config->path, g_free);
         g_clear_pointer(&config->input_path, g_free);
+        g_clear_pointer(&config->runtime_dir, g_free);
     }
 }

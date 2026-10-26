@@ -118,7 +118,7 @@ $(LOCALE_RESOURCE): data/locales/en.ini | build
 	install -Dm644 "$<" "$@"
 
 $(CONFIG_TEST): tests/config.c src/config.c src/config.h data/mpv.conf data/input.conf | build
-	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -Isrc -o "$@" tests/config.c src/config.c $(shell $(PKG_CONFIG) --libs glib-2.0)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -Isrc -o "$@" tests/config.c src/config.c $(shell $(PKG_CONFIG) --libs gio-2.0)
 
 $(I18N_TEST): tests/i18n.c src/i18n.c src/i18n.h | build
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -Isrc -o "$@" tests/i18n.c src/i18n.c $(shell $(PKG_CONFIG) --libs glib-2.0)
@@ -344,28 +344,8 @@ install: $(TARGET) $(CONFIG) $(INPUT_CONFIG) $(DESKTOP) $(LOCALE_RESOURCE) $(STO
 	install -Dm644 "$(LOCALE_RESOURCE)" "$(APPDIR)/locales/en.ini"
 	rm -f "$(APPDIR)/trim-licenses/LICENSE.LGPL" "$(APPDIR)/trim-licenses/NOTICE.txt"
 	@if [ -d "$(APPDIR)/trim-licenses" ]; then rmdir --ignore-fail-on-non-empty "$(APPDIR)/trim-licenses"; fi
-	rm -f "$(APPDIR)/scripts/trim-mode.lua" "$(APPDIR)/scripts/LICENSE.LGPL" "$(APPDIR)/scripts/NOTICE.txt"
-	@if [ ! -e "$(APPDIR)/script-opts/trim-mode.conf" ] && [ ! -L "$(APPDIR)/script-opts/trim-mode.conf" ]; then \
-		install -Dm600 "$(TRIM_CONFIG)" "$(APPDIR)/script-opts/trim-mode.conf"; \
-	fi
 	install -Dm644 "data/icons/scalable/apps/multimedia-video-player.svg" "$(DATADIR)/icons/hicolor/scalable/apps/io.github.emless.mpvgtk.svg"
 	@for license in LICENSE.GPL3 NOTICE.txt SOURCES.tsv; do install -Dm644 "data/icons/$$license" "$(APPDIR)/icon-licenses/$$license"; done
-	@if [ ! -e "$(APPDIR)/mpv.conf" ] && [ ! -L "$(APPDIR)/mpv.conf" ]; then \
-		legacy="$${XDG_CONFIG_HOME:-$(HOME)/.config}/mpv-gtk/mpv.conf"; \
-		if [ -f "$$legacy" ]; then \
-			install -m600 "$$legacy" "$(APPDIR)/mpv.conf"; \
-		else \
-			install -m600 "$(CONFIG)" "$(APPDIR)/mpv.conf"; \
-		fi; \
-	fi
-	@if [ ! -e "$(APPDIR)/input.conf" ] && [ ! -L "$(APPDIR)/input.conf" ]; then \
-		legacy="$${XDG_CONFIG_HOME:-$(HOME)/.config}/mpv-gtk/input.conf"; \
-		if [ -f "$$legacy" ]; then \
-			install -m600 "$$legacy" "$(APPDIR)/input.conf"; \
-		else \
-			install -m600 "$(INPUT_CONFIG)" "$(APPDIR)/input.conf"; \
-		fi; \
-	fi
 	install -d "$(BINDIR)"
 	ln -sfn "$(abspath $(APPDIR))/mpv-gtk" "$(BINDIR)/mpv-gtk"
 	install -Dm644 "$(DESKTOP)" "$(DATADIR)/applications/io.github.emless.mpvgtk.desktop"
@@ -378,7 +358,6 @@ install: $(TARGET) $(CONFIG) $(INPUT_CONFIG) $(DESKTOP) $(LOCALE_RESOURCE) $(STO
 
 uninstall:
 	rm -f "$(APPDIR)/trim-licenses/LICENSE.LGPL" "$(APPDIR)/trim-licenses/NOTICE.txt"
-	rm -f "$(APPDIR)/scripts/trim-mode.lua" "$(APPDIR)/scripts/LICENSE.LGPL" "$(APPDIR)/scripts/NOTICE.txt"
 	rm -f "$(APPDIR)/mpv-gtk" "$(APPDIR)/libmpv.so.2" "$(APPDIR)/mpv-engine" "$(APPDIR)/stock-mpv.json" "$(APPDIR)/stock-mpv-version.txt" "$(APPDIR)/locales/en.ini" "$(BINDIR)/mpv-gtk" "$(DATADIR)/applications/io.github.emless.mpvgtk.desktop"
 	rm -f "$(APPDIR)/stock-mpv-licenses/Copyright" "$(APPDIR)/stock-mpv-licenses/LICENSE.GPL" "$(APPDIR)/stock-mpv-licenses/LICENSE.LGPL"
 	rm -f "$(DATADIR)/icons/hicolor/scalable/apps/io.github.emless.mpvgtk.svg" "$(APPDIR)/icon-licenses/LICENSE.GPL3" "$(APPDIR)/icon-licenses/NOTICE.txt" "$(APPDIR)/icon-licenses/SOURCES.tsv"

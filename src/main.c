@@ -41,7 +41,7 @@
 #include "queue_view.h"
 
 #define APP_ID "io.github.emless.mpvgtk"
-#define APP_VERSION "0.22.6"
+#define APP_VERSION "0.22.7"
 #define APP_ICON_NAME APP_ID
 #define HWDEC_REFRESH_ID UINT64_C(10001)
 #define HWDEC_SET_ID UINT64_C(10002)
@@ -3738,7 +3738,13 @@ static gboolean init_mpv_core(Player *p)
     /* config=no also disables mpv's automatic state-directory lookup. Keep
      * native watch-later saving/resume available without global configs;
      * an explicit path in mpv.conf is loaded afterwards and takes priority. */
-    g_autofree char *watch_later_directory = g_build_filename(config_directory, "watch_later", NULL);
+    g_autofree char *runtime_directory = config_runtime_directory(&p->config);
+    if (g_mkdir_with_parents(runtime_directory, 0700) < 0) {
+        g_printerr("mpv-gtk: Cannot create runtime directory %s: %s\n",
+                   runtime_directory, g_strerror(errno));
+        return FALSE;
+    }
+    g_autofree char *watch_later_directory = g_build_filename(runtime_directory, "watch_later", NULL);
     mpv_set_option_string(p->mpv, "watch-later-dir", watch_later_directory);
     /* The same isolated configuration also removes mpv's default cache path.
      * Restore its persistent shader cache instead of recompiling at launch. */
@@ -3972,6 +3978,7 @@ static void start_mpv_async(Player *p)
     engine->test_seconds = p->test_seconds;
     engine->config.path = g_strdup(p->config.path);
     engine->config.input_path = g_strdup(p->config.input_path);
+    engine->config.runtime_dir = config_runtime_directory(&p->config);
     /* Keep Player's stack and the main context alive if its window closes
      * while mpv_initialize is running. Completion then only frees the engine. */
     g_application_hold(G_APPLICATION(p->application));
@@ -4377,12 +4384,14 @@ static void activate(GtkApplication *application, gpointer data)
     g_signal_connect(chapter_context, "released", G_CALLBACK(chapter_secondary_click), p);
     gtk_widget_add_controller(p->chapter_button, GTK_EVENT_CONTROLLER(chapter_context));
     gtk_box_append(GTK_BOX(transport), p->chapter_button);
+    g_autofree char *trim_runtime_directory = config_runtime_directory(&p->config);
     TrimHost trim_host = {
         .mpv = p->mpv, .window = p->window,
         .controls = GTK_BOX(p->controls), .transport = GTK_BOX(transport),
         .seek = p->seek_overlay, .playback = playback, .audio_time = audio_time,
         .status = p->status_label, .time = GTK_LABEL(p->time_label),
         .video = GTK_OVERLAY(p->video_overlay), .config_path = config_path(&p->config),
+        .runtime_directory = trim_runtime_directory,
         .seek_to = trim_seek_to, .message = trim_message, .data = p,
         .scrub_begin = trim_scrub_begin, .scrub_end = trim_scrub_end, .scrub_cancel = trim_scrub_cancel,
         .previews = p->seek_preview

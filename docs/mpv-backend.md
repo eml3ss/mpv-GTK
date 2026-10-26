@@ -27,11 +27,23 @@ holds video output initialization until GTK has created the shared GL context
 and Render API. The application releases the hook and presents the window once
 the media has loaded.
 
-Because `config=no` disables mpv's automatic configuration-directory lookup,
-the application explicitly supplies paths for watch-later state and the GPU
-shader cache. User-specified paths in `mpv.conf` take precedence.
+Configuration defaults to `~/.config/mpv-gtk/`, or
+`$XDG_CONFIG_HOME/mpv-gtk` when that variable is set. This directory contains
+`mpv.conf`, `input.conf`, `interface.conf`, scripts, and
+`script-opts/trim-mode.conf`. Runtime data, including `trim-mode-state.json`
+and the `watch_later/` playback-position files, stays in
+`~/.local/share/mpv-gtk/` (`$XDG_DATA_HOME/mpv-gtk` when set).
+`MPV_GTK_CONFIG_FILE` overrides the main config path; input bindings, interface
+preferences, Trim Mode options, and saved state then use its parent directory.
 
-Example configuration beside the executable:
+Because `config=no` disables mpv's automatic configuration-directory lookup,
+the application explicitly supplies its config directory and watch-later path.
+The GPU shader cache and desktop artwork remain under `~/.cache/mpv-gtk/`
+(`$XDG_CACHE_HOME/mpv-gtk` when set). User-specified paths in `mpv.conf` take
+precedence. Immutable binaries, libraries, translations, and license files
+remain in the installation directory.
+
+Example `~/.config/mpv-gtk/mpv.conf`:
 
 ```ini
 vo=libmpv

@@ -85,11 +85,16 @@ The native backend initializes when Trim Mode is first used; its widgets and
 keyframe scan are also deferred. Keyframe scanning is asynchronous and caches recent files.
 Markers are drawn from cached geometry, independently of video frame updates.
 
-Options live in `script-opts/trim-mode.conf` beside the real executable.
+Options live in `~/.config/mpv-gtk/script-opts/trim-mode.conf`
+(`$XDG_CONFIG_HOME/mpv-gtk/script-opts/trim-mode.conf` when set).
 Updates preserve this file. Available options are `remember`, `open-copy`,
 `open-replace`, `ffmpeg_path`, and `ffprobe_path`. The defaults open exported
 results and do not remember the mode. Enabling `remember` restores the saved
-mode and initializes its backend at startup. State stays in the player directory.
+mode and initializes its backend at startup. Runtime state stays in
+`~/.local/share/mpv-gtk/trim-mode-state.json`
+(`$XDG_DATA_HOME/mpv-gtk/trim-mode-state.json` when set). An explicit
+`MPV_GTK_CONFIG_FILE` keeps both options and state under that config file's
+parent directory for isolated runs.
 The system mpv plugin and configuration are unchanged.
 
 The focused integration check, `make test-trim`, uses generated media and an
