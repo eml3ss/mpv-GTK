@@ -12,8 +12,12 @@ changing the underlying queue. Dragging or removing filtered results still
 targets the original entries, including when the same file occurs more than
 once.
 
-The sorting menu orders the whole queue by title or path in either direction,
-with natural numeric ordering. Shuffle randomizes the whole queue once.
+The sorting menu orders the whole queue by title, path, creation date, or
+modification date in either direction. Titles and paths use natural numeric
+ordering. Dates are read on demand for local files; entries without the
+requested date, including network URLs, stay after dated entries in both
+directions. Creation sorting uses the file's actual birth time when available.
+Shuffle randomizes the whole queue once.
 Repeat loops the whole queue using mpv's playlist repeat setting. Reordering,
 sorting, and shuffling keep the current file and playback position.
 

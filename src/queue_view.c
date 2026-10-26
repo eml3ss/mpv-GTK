@@ -261,6 +261,44 @@ static void handle_draw(GtkDrawingArea *area, cairo_t *cr, int width, int height
         }
 }
 
+static void action_icon_draw(GtkDrawingArea *area, cairo_t *cr, int width, int height, gpointer data)
+{
+    GdkRGBA color;
+    gtk_widget_get_color(GTK_WIDGET(area), &color);
+    gdk_cairo_set_source_rgba(cr, &color);
+    cairo_translate(cr, (width - 16) / 2.0, (height - 16) / 2.0);
+    cairo_set_line_width(cr, 1.5);
+    cairo_set_line_cap(cr, CAIRO_LINE_CAP_ROUND);
+    cairo_set_line_join(cr, CAIRO_LINE_JOIN_ROUND);
+    if (GPOINTER_TO_INT(data)) {
+        cairo_move_to(cr, 2, 4.5); cairo_line_to(cr, 4, 4.5);
+        cairo_curve_to(cr, 7, 4.5, 8.5, 11.5, 11.5, 11.5); cairo_line_to(cr, 14, 11.5);
+        cairo_move_to(cr, 11.5, 9); cairo_line_to(cr, 14, 11.5); cairo_line_to(cr, 11.5, 14);
+        cairo_move_to(cr, 2, 11.5); cairo_line_to(cr, 4, 11.5);
+        cairo_curve_to(cr, 7, 11.5, 8.5, 4.5, 11.5, 4.5); cairo_line_to(cr, 14, 4.5);
+        cairo_move_to(cr, 11.5, 2); cairo_line_to(cr, 14, 4.5); cairo_line_to(cr, 11.5, 7);
+    } else {
+        cairo_move_to(cr, 2.5, 7); cairo_line_to(cr, 2.5, 5.5);
+        cairo_curve_to(cr, 2.5, 4.4, 3.4, 3.5, 4.5, 3.5); cairo_line_to(cr, 13.5, 3.5);
+        cairo_move_to(cr, 11, 1); cairo_line_to(cr, 13.5, 3.5); cairo_line_to(cr, 11, 6);
+        cairo_move_to(cr, 13.5, 9); cairo_line_to(cr, 13.5, 10.5);
+        cairo_curve_to(cr, 13.5, 11.6, 12.6, 12.5, 11.5, 12.5); cairo_line_to(cr, 2.5, 12.5);
+        cairo_move_to(cr, 5, 10); cairo_line_to(cr, 2.5, 12.5); cairo_line_to(cr, 5, 15);
+    }
+    cairo_stroke(cr);
+}
+
+static GtkWidget *action_icon(gboolean shuffle)
+{
+    GtkWidget *icon = gtk_drawing_area_new();
+    gtk_drawing_area_set_content_width(GTK_DRAWING_AREA(icon), 16);
+    gtk_drawing_area_set_content_height(GTK_DRAWING_AREA(icon), 16);
+    gtk_drawing_area_set_draw_func(GTK_DRAWING_AREA(icon), action_icon_draw,
+                                  GINT_TO_POINTER(shuffle), NULL);
+    gtk_widget_set_can_target(icon, FALSE);
+    return icon;
+}
+
 static GdkContentProvider *drag_prepare(GtkDragSource *source, double x, double y, gpointer data)
 {
     (void)source; (void)x; (void)y;
@@ -515,7 +553,8 @@ static void translate_widgets(GtkWidget *widget)
     const char *key = g_object_get_data(G_OBJECT(widget), "queue-tooltip");
     if (key) tooltip(widget, key);
     key = g_object_get_data(G_OBJECT(widget), "queue-button-label");
-    if (key && GTK_IS_BUTTON(widget)) gtk_button_set_label(GTK_BUTTON(widget), tr(key));
+    if (key && GTK_IS_BUTTON(widget) && !g_object_get_data(G_OBJECT(widget), "queue-icon-button"))
+        gtk_button_set_label(GTK_BUTTON(widget), tr(key));
     for (GtkWidget *child = gtk_widget_get_first_child(widget); child;
          child = gtk_widget_get_next_sibling(child)) translate_widgets(child);
 }
@@ -579,8 +618,12 @@ QueueView *queue_view_new(QueueModel *model)
     tooltip(view->sort, "Сортировать всю очередь");
     GtkWidget *popover = gtk_popover_new();
     GtkWidget *sorts = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
-    const char *labels[] = {"Название: А–Я", "Название: Я–А", "Путь: А–Я", "Путь: Я–А"};
+    const char *labels[] = {"Название: А–Я", "Название: Я–А", "Путь: А–Я", "Путь: Я–А",
+        "Дата создания: сначала старые", "Дата создания: сначала новые",
+        "Дата изменения: сначала старые", "Дата изменения: сначала новые"};
     for (guint i = 0; i < G_N_ELEMENTS(labels); ++i) {
+        if (i == 4 || i == 6)
+            gtk_box_append(GTK_BOX(sorts), gtk_separator_new(GTK_ORIENTATION_HORIZONTAL));
         GtkWidget *button = text_button(labels[i]);
         g_object_set_data(G_OBJECT(button), "queue-sort", GINT_TO_POINTER(i));
         g_signal_connect(button, "clicked", G_CALLBACK(sort_clicked), view);
@@ -590,10 +633,13 @@ QueueView *queue_view_new(QueueModel *model)
     gtk_menu_button_set_popover(GTK_MENU_BUTTON(view->sort), popover);
     gtk_box_append(GTK_BOX(actions), view->sort);
     view->shuffle = text_button("Перемешать");
+    g_object_set_data(G_OBJECT(view->shuffle), "queue-icon-button", GINT_TO_POINTER(TRUE));
+    gtk_button_set_child(GTK_BUTTON(view->shuffle), action_icon(TRUE));
     tooltip(view->shuffle, "Перемешать всю очередь");
     g_signal_connect(view->shuffle, "clicked", G_CALLBACK(shuffle_clicked), view);
     gtk_box_append(GTK_BOX(actions), view->shuffle);
-    view->repeat = gtk_toggle_button_new_with_label("↻");
+    view->repeat = gtk_toggle_button_new();
+    gtk_button_set_child(GTK_BUTTON(view->repeat), action_icon(FALSE));
     gtk_widget_add_css_class(view->repeat, "flat");
     gtk_widget_add_css_class(view->repeat, "queue-action");
     tooltip(view->repeat, "Повторять всю очередь");

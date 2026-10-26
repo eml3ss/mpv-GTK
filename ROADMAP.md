@@ -10,6 +10,7 @@ from unfinished interface work. Item 16 is tentative.
 - [x] Add files through opening or drag and drop; configure automatic playlists.
 - [x] Reorder entries by dragging, remove selected entries, and clear the queue.
 - [x] Add search, sorting, shuffle, and repeat controls for the whole queue.
+- [x] Sort local queue entries by creation and modification dates in either direction.
 
 ## 2. Saved playlists and sessions
 

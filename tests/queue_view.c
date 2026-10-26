@@ -126,6 +126,15 @@ int main(void)
     GtkWidget *search = find_type(root, GTK_TYPE_SEARCH_ENTRY);
     GtkWidget *remove = find_button(root, "Удалить"), *clear = find_button(root, "Очистить");
     g_assert_nonnull(search); g_assert_nonnull(remove); g_assert_nonnull(clear);
+    const char *date_labels[] = {"Дата создания: сначала старые", "Дата создания: сначала новые",
+        "Дата изменения: сначала старые", "Дата изменения: сначала новые"};
+    for (guint i = 0; i < G_N_ELEMENTS(date_labels); ++i)
+        g_assert_nonnull(find_button(root, date_labels[i]));
+    GtkWidget *shuffle = find_button(root, "Перемешать");
+    g_assert_true(GTK_IS_DRAWING_AREA(gtk_button_get_child(GTK_BUTTON(shuffle))));
+    GtkWidget *repeat = gtk_widget_get_next_sibling(shuffle);
+    g_assert_true(GTK_IS_TOGGLE_BUTTON(repeat));
+    g_assert_true(GTK_IS_DRAWING_AREA(gtk_button_get_child(GTK_BUTTON(repeat))));
     /* A filename must not make the sidebar's natural width swallow video. */
     GtkWidget *title = gtk_widget_get_first_child(
         gtk_list_box_row_get_child(row_named(test.view, "Alpha")));
@@ -153,6 +162,10 @@ int main(void)
     g_assert_cmpuint(selection_count(test.view), ==, 2);
     g_assert_true(gtk_list_box_row_is_selected(row_named(test.view, "Бета")));
     g_assert_true(gtk_list_box_row_is_selected(row_named(test.view, "Alpha copy")));
+    /* A date menu action must reach the model while retaining the selection;
+     * every missing local file is an unknown date, so this is a stable no-op. */
+    g_signal_emit_by_name(find_button(root, date_labels[3]), "clicked"); settle(host); assert_ok(host);
+    g_assert_cmpuint(selection_count(test.view), ==, 2);
     queue_model_set_position(host->model, 0);
     GtkListBoxRow *first = gtk_list_box_get_row_at_index(GTK_LIST_BOX(list), 0);
     g_assert_true(gtk_widget_has_css_class(GTK_WIDGET(first), "queue-current"));
@@ -216,6 +229,8 @@ int main(void)
     g_assert_null(row_named(test.view, "Бета")); g_assert_null(row_named(test.view, "Other"));
     i18n_set_language("en"); queue_view_translate(test.view);
     g_assert_cmpstr(gtk_label_get_text(GTK_LABEL(queue_view_count_label(test.view))), ==, "Queue · 2");
+    g_assert_true(GTK_IS_DRAWING_AREA(gtk_button_get_child(GTK_BUTTON(shuffle))));
+    g_assert_true(GTK_IS_DRAWING_AREA(gtk_button_get_child(GTK_BUTTON(repeat))));
     g_signal_emit_by_name(clear, "clicked"); settle(host); assert_ok(host);
     g_assert_cmpint(integer(host->mpv, "playlist-count"), ==, 0);
     g_assert_false(gtk_widget_get_sensitive(clear)); g_assert_false(gtk_widget_get_sensitive(remove));

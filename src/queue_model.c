@@ -8,12 +8,32 @@
 
 typedef enum { ACTION_NONE, ACTION_PLAY, ACTION_REMOVE, ACTION_MOVE,
                ACTION_CLEAR, ACTION_SORT, ACTION_SHUFFLE, ACTION_REPEAT } Action;
-typedef enum { REQUEST_NONE, REQUEST_PLAYLIST, REQUEST_COMMAND, REQUEST_REPEAT } Request;
+typedef enum { REQUEST_NONE, REQUEST_PLAYLIST, REQUEST_COMMAND, REQUEST_REPEAT,
+               REQUEST_DIRECTORY } Request;
+
+typedef struct {
+    int64_t id;
+    guint ordinal;
+    char *filename;
+    gint64 seconds;
+    guint32 nanoseconds;
+    gboolean known;
+} FileDate;
+
+typedef struct {
+    QueueModel *owner;
+    GPtrArray *files;
+    char *directory;
+    gboolean created, descending;
+} DateScan;
 
 struct QueueModel {
+    gint references;
     mpv_handle *mpv;
     GPtrArray *entries;
+    GPtrArray *date_entries;
     GArray *ids, *order;
+    GCancellable *date_cancel;
     char *repeat;
     void (*changed)(gpointer);
     void (*error)(const char *, gpointer);
@@ -58,6 +78,31 @@ static void entry_free(gpointer data)
     g_free(entry);
 }
 
+static void file_date_free(gpointer data)
+{
+    FileDate *date = data;
+    g_free(date->filename);
+    g_free(date);
+}
+
+static QueueModel *model_ref(QueueModel *m)
+{
+    g_atomic_int_inc(&m->references);
+    return m;
+}
+
+static void model_unref(QueueModel *m)
+{
+    if (!g_atomic_int_dec_and_test(&m->references)) return;
+    g_ptr_array_unref(m->entries);
+    g_clear_pointer(&m->date_entries, g_ptr_array_unref);
+    g_clear_pointer(&m->ids, g_array_unref);
+    g_clear_pointer(&m->order, g_array_unref);
+    g_clear_object(&m->date_cancel);
+    g_free(m->repeat);
+    g_free(m);
+}
+
 static void changed(QueueModel *m)
 {
     if (!m->stopped && m->changed) m->changed(m->data);
@@ -70,6 +115,9 @@ static void finish(QueueModel *m, const char *error)
     m->request_id = 0;
     g_clear_pointer(&m->ids, g_array_unref);
     g_clear_pointer(&m->order, g_array_unref);
+    g_clear_pointer(&m->date_entries, g_ptr_array_unref);
+    if (m->date_cancel) g_cancellable_cancel(m->date_cancel);
+    g_clear_object(&m->date_cancel);
     changed(m);
     if (error && !m->stopped && m->error) m->error(error, m->data);
 }
@@ -79,6 +127,7 @@ QueueModel *queue_model_new(mpv_handle *mpv, void (*changed_cb)(gpointer),
 {
     g_return_val_if_fail(mpv != NULL, NULL);
     QueueModel *m = g_new0(QueueModel, 1);
+    m->references = 1;
     m->mpv = mpv;
     m->entries = g_ptr_array_new_with_free_func(entry_free);
     m->repeat = g_strdup("no");
@@ -256,6 +305,146 @@ static void prepare_sort(QueueModel *m)
     m->command_limit = MIN((guint64)entries->len * 2 + 16, (guint64)G_MAXUINT);
 }
 
+static gboolean date_sort(QueueSort sort)
+{
+    return sort >= QUEUE_SORT_CREATED_ASC && sort <= QUEUE_SORT_MODIFIED_DESC;
+}
+
+static void date_scan_free(gpointer data)
+{
+    DateScan *scan = data;
+    g_ptr_array_unref(scan->files);
+    g_free(scan->directory);
+    model_unref(scan->owner);
+    g_free(scan);
+}
+
+static GFile *date_file(const char *filename, const char *directory)
+{
+    if (!filename || !*filename) return NULL;
+    if (g_path_is_absolute(filename)) return g_file_new_for_path(filename);
+    g_autofree char *scheme = g_uri_parse_scheme(filename);
+    if (scheme) {
+        if (g_ascii_strcasecmp(scheme, "file") != 0) return NULL;
+        g_autofree char *hostname = NULL;
+        g_autofree char *path = g_filename_from_uri(filename, &hostname, NULL);
+        if (!path || (hostname && *hostname && g_ascii_strcasecmp(hostname, "localhost") != 0))
+            return NULL;
+        return g_file_new_for_path(path);
+    }
+    /* Resolve against the engine's directory, not the frontend process's
+     * current directory or the directory containing another playlist item. */
+    if (!directory || !g_path_is_absolute(directory)) return NULL;
+    g_autofree char *path = g_build_filename(directory, filename, NULL);
+    return g_file_new_for_path(path);
+}
+
+static gint compare_dates(gconstpointer a, gconstpointer b, gpointer data)
+{
+    const FileDate *left = *(FileDate *const *)a, *right = *(FileDate *const *)b;
+    /* Unknown dates always stay after real dates, including newest-first. */
+    if (left->known != right->known) return left->known ? -1 : 1;
+    if (left->known) {
+        int order = (left->seconds > right->seconds) - (left->seconds < right->seconds);
+        if (!order)
+            order = (left->nanoseconds > right->nanoseconds) -
+                    (left->nanoseconds < right->nanoseconds);
+        if (order) return GPOINTER_TO_INT(data) ? -order : order;
+    }
+    return (left->ordinal > right->ordinal) - (left->ordinal < right->ordinal);
+}
+
+static void scan_dates(GTask *task, gpointer source, gpointer data, GCancellable *cancel)
+{
+    (void)source;
+    DateScan *scan = data;
+    const char *seconds = scan->created ? G_FILE_ATTRIBUTE_TIME_CREATED : G_FILE_ATTRIBUTE_TIME_MODIFIED;
+    const char *nsec = scan->created ? G_FILE_ATTRIBUTE_TIME_CREATED_NSEC : G_FILE_ATTRIBUTE_TIME_MODIFIED_NSEC;
+    const char *usec = scan->created ? G_FILE_ATTRIBUTE_TIME_CREATED_USEC : G_FILE_ATTRIBUTE_TIME_MODIFIED_USEC;
+    g_autofree char *attributes = g_strdup_printf("%s,%s,%s", seconds, nsec, usec);
+    for (guint i = 0; i < scan->files->len; ++i) {
+        if (g_task_return_error_if_cancelled(task)) return;
+        FileDate *date = scan->files->pdata[i];
+        g_autoptr(GFile) file = date_file(date->filename, scan->directory);
+        if (!file) continue;
+        /* Local GIO exposes true birth time when the filesystem provides it;
+         * absent creation metadata stays unknown, with no ctime fallback. */
+        g_autoptr(GFileInfo) info = g_file_query_info(file, attributes,
+            G_FILE_QUERY_INFO_NONE, cancel, NULL);
+        if (!info || !g_file_info_has_attribute(info, seconds)) continue;
+        date->seconds = (gint64)g_file_info_get_attribute_uint64(info, seconds);
+        if (g_file_info_has_attribute(info, nsec))
+            date->nanoseconds = g_file_info_get_attribute_uint32(info, nsec);
+        else if (g_file_info_has_attribute(info, usec))
+            date->nanoseconds = g_file_info_get_attribute_uint32(info, usec) * 1000;
+        date->known = date->nanoseconds < 1000000000;
+    }
+    if (g_task_return_error_if_cancelled(task)) return;
+    g_ptr_array_sort_with_data(scan->files, compare_dates, GINT_TO_POINTER(scan->descending));
+    GArray *order = g_array_sized_new(FALSE, FALSE, sizeof(int64_t), scan->files->len);
+    for (guint i = 0; i < scan->files->len; ++i) {
+        const FileDate *date = scan->files->pdata[i];
+        g_array_append_val(order, date->id);
+    }
+    g_task_return_pointer(task, order, (GDestroyNotify)g_array_unref);
+}
+
+static void dates_ready(GObject *source, GAsyncResult *result, gpointer data)
+{
+    (void)source; (void)data;
+    GTask *task = G_TASK(result);
+    DateScan *scan = g_task_get_task_data(task);
+    QueueModel *m = scan->owner;
+    g_autoptr(GError) error = NULL;
+    GArray *order = g_task_propagate_pointer(task, &error);
+    g_clear_object(&m->date_cancel);
+    if (m->stopped) {
+        g_clear_pointer(&order, g_array_unref);
+        return;
+    }
+    if (!order) {
+        finish(m, error ? error->message : "Cannot inspect queue file dates.");
+        return;
+    }
+    m->order = order;
+    m->command_limit = MIN((guint64)order->len * 2 + 16, (guint64)G_MAXUINT);
+    /* The core may have changed while filesystem metadata was read. Check
+     * membership in a fresh native snapshot before issuing any move. */
+    snapshot(m);
+}
+
+static void start_date_worker(QueueModel *m, const char *directory)
+{
+    DateScan *scan = g_new0(DateScan, 1);
+    scan->owner = model_ref(m);
+    scan->files = g_steal_pointer(&m->date_entries);
+    scan->directory = g_strdup(directory);
+    scan->created = m->sort == QUEUE_SORT_CREATED_ASC || m->sort == QUEUE_SORT_CREATED_DESC;
+    scan->descending = m->sort == QUEUE_SORT_CREATED_DESC || m->sort == QUEUE_SORT_MODIFIED_DESC;
+    m->date_cancel = g_cancellable_new();
+    GTask *task = g_task_new(NULL, m->date_cancel, dates_ready, NULL);
+    g_task_set_task_data(task, scan, date_scan_free);
+    g_task_set_return_on_cancel(task, FALSE);
+    g_task_run_in_thread(task, scan_dates);
+    g_object_unref(task);
+}
+
+static void prepare_date_sort(QueueModel *m)
+{
+    m->date_entries = g_ptr_array_new_with_free_func(file_date_free);
+    for (guint i = 0; i < m->entries->len; ++i) {
+        const QueueEntry *entry = m->entries->pdata[i];
+        FileDate *date = g_new0(FileDate, 1);
+        date->id = entry->id;
+        date->ordinal = i;
+        date->filename = g_strdup(entry->filename);
+        g_ptr_array_add(m->date_entries, date);
+    }
+    int status = mpv_get_property_async(m->mpv, request_id(m, REQUEST_DIRECTORY),
+                                       "working-directory", MPV_FORMAT_STRING);
+    if (status < 0) finish(m, mpv_error_string(status));
+}
+
 static gboolean same_membership(QueueModel *m)
 {
     if (!m->order || m->entries->len != m->order->len) return FALSE;
@@ -276,7 +465,13 @@ static void process_snapshot(QueueModel *m)
         return;
     }
     if (m->action == ACTION_SORT) {
-        if (!m->order) prepare_sort(m);
+        if (!m->order) {
+            if (date_sort(m->sort)) {
+                prepare_date_sort(m);
+                return;
+            }
+            prepare_sort(m);
+        }
         else if (!same_membership(m)) {
             finish(m, "The queue changed while sorting. Please try again.");
             return;
@@ -354,6 +549,14 @@ gboolean queue_model_handle_event(QueueModel *m, const mpv_event *event)
         }
         queue_model_update(m, node);
         process_snapshot(m);
+    } else if (request == REQUEST_DIRECTORY) {
+        const mpv_event_property *property = event->data;
+        if (!property || property->format != MPV_FORMAT_STRING || !property->data ||
+            !*(const char *const *)property->data) {
+            finish(m, "Cannot read the player's working directory.");
+            return TRUE;
+        }
+        start_date_worker(m, *(const char *const *)property->data);
     } else if (request == REQUEST_REPEAT) {
         const mpv_event_property *property = event->data;
         if (property && property->format == MPV_FORMAT_STRING && property->data)
@@ -403,7 +606,7 @@ void queue_model_clear(QueueModel *m)
 
 void queue_model_sort(QueueModel *m, QueueSort sort)
 {
-    if (sort < QUEUE_SORT_TITLE_ASC || sort > QUEUE_SORT_PATH_DESC || !begin(m, ACTION_SORT)) return;
+    if (sort < QUEUE_SORT_TITLE_ASC || sort > QUEUE_SORT_MODIFIED_DESC || !begin(m, ACTION_SORT)) return;
     m->sort = sort;
     snapshot(m);
 }
@@ -422,12 +625,9 @@ void queue_model_set_repeat(QueueModel *m, gboolean enabled)
 
 void queue_model_free(QueueModel *m)
 {
-    if (!m) return;
+    if (!m || m->stopped) return;
     m->stopped = TRUE;
     if (m->request_id) mpv_abort_async_command(m->mpv, m->request_id);
-    g_ptr_array_unref(m->entries);
-    g_clear_pointer(&m->ids, g_array_unref);
-    g_clear_pointer(&m->order, g_array_unref);
-    g_free(m->repeat);
-    g_free(m);
+    if (m->date_cancel) g_cancellable_cancel(m->date_cancel);
+    model_unref(m);
 }

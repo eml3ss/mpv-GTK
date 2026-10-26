@@ -5,9 +5,11 @@
 
 #include <gio/gio.h>
 #include <glib/gstdio.h>
+#include <fcntl.h>
 #include <locale.h>
 #include <math.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -92,10 +94,8 @@ static void failed(const char *message, gpointer data)
     g_free(host->error); host->error = g_strdup(message);
 }
 
-static void poll_host(Host *host)
+static void dispatch_event(Host *host, mpv_event *event)
 {
-    while (g_main_context_iteration(NULL, FALSE)) {}
-    mpv_event *event = mpv_wait_event(host->mpv, .005);
     if (host->model) queue_model_handle_event(host->model, event);
     if (event->event_id == MPV_EVENT_PROPERTY_CHANGE && host->model) {
         mpv_event_property *property = event->data;
@@ -111,6 +111,12 @@ static void poll_host(Host *host)
         mpv_event_end_file *end = event->data;
         g_assert_cmpint(end->reason, !=, MPV_END_FILE_REASON_ERROR);
     }
+}
+
+static void poll_host(Host *host)
+{
+    while (g_main_context_iteration(NULL, FALSE)) {}
+    dispatch_event(host, mpv_wait_event(host->mpv, .005));
 }
 
 static void settle(Host *host)
@@ -181,6 +187,110 @@ static void assert_preserved(Host *host, const GPtrArray *original, int64_t curr
     assert_ok(host);
 }
 
+static void check_dates(Host *host, const GPtrArray *original, const int64_t *ids,
+                        double position, guint loaded, gboolean birthtime)
+{
+    queue_model_sort(host->model, QUEUE_SORT_MODIFIED_ASC); settle(host);
+    int64_t modified_asc[] = {ids[1], ids[4], ids[0], ids[3], ids[2]};
+    assert_order(host, modified_asc, 5); assert_preserved(host, original, ids[0], position, loaded);
+    queue_model_sort(host->model, QUEUE_SORT_MODIFIED_DESC); settle(host);
+    int64_t modified_desc[] = {ids[2], ids[0], ids[3], ids[4], ids[1]};
+    assert_order(host, modified_desc, 5); assert_preserved(host, original, ids[0], position, loaded);
+    queue_model_sort(host->model, QUEUE_SORT_CREATED_ASC); settle(host);
+    int64_t created_asc[] = {ids[0], ids[3], ids[1], ids[2], ids[4]};
+    assert_order(host, birthtime ? created_asc : modified_desc, 5);
+    assert_preserved(host, original, ids[0], position, loaded);
+    queue_model_sort(host->model, QUEUE_SORT_CREATED_DESC); settle(host);
+    int64_t created_desc[] = {ids[4], ids[2], ids[1], ids[0], ids[3]};
+    assert_order(host, birthtime ? created_desc : modified_desc, 5);
+    assert_preserved(host, original, ids[0], position, loaded);
+}
+
+static void check_date_paths(Host *host, const char *directory, const char *path,
+                             const GPtrArray *original, const int64_t *ids,
+                             double position, guint loaded, gboolean birthtime)
+{
+    g_autofree char *cwd = g_get_current_dir();
+    g_autofree char *pwd = g_strdup(g_getenv("PWD"));
+    g_assert_cmpint(g_chdir(directory), ==, 0);
+    /* mpv's working-directory property prefers PWD to getcwd(). */
+    g_assert_cmpint(setenv("PWD", directory, 1), ==, 0);
+    char *working = mpv_get_property_string(host->mpv, "working-directory");
+    g_assert_cmpstr(working, ==, directory); mpv_free(working);
+    g_autofree char *uri = g_filename_to_uri(path, NULL, NULL);
+    const char *inputs[] = {"/tmp/mpv-gtk-deliberately-missing-date.mp4",
+        "https://example.invalid/queue-date.mp4", uri, "dirA/a2.mp4"};
+    for (guint i = 0; i < G_N_ELEMENTS(inputs); ++i) {
+        const char *append[] = {"loadfile", inputs[i], "append", NULL};
+        g_assert_cmpint(mpv_command(host->mpv, append), >=, 0);
+    }
+    g_autoptr(GPtrArray) full = snapshot(host->mpv);
+    g_assert_cmpuint(full->len, ==, 9);
+    int64_t extra[4];
+    for (guint i = 0; i < 4; ++i) extra[i] = ((Entry *)full->pdata[i + 5])->id;
+    queue_model_sort(host->model, QUEUE_SORT_MODIFIED_ASC); settle(host);
+    int64_t ascending[] = {ids[1], extra[3], ids[4], ids[0], ids[3], extra[2], ids[2], extra[0], extra[1]};
+    assert_order(host, ascending, 9); assert_preserved(host, full, ids[0], position, loaded);
+    queue_model_sort(host->model, QUEUE_SORT_MODIFIED_DESC); settle(host);
+    int64_t descending[] = {ids[2], ids[0], ids[3], extra[2], ids[4], ids[1], extra[3], extra[0], extra[1]};
+    assert_order(host, descending, 9); assert_preserved(host, full, ids[0], position, loaded);
+    if (birthtime) {
+        queue_model_sort(host->model, QUEUE_SORT_CREATED_ASC); settle(host);
+        int64_t created_asc[] = {ids[0], ids[3], extra[2], ids[1], extra[3], ids[2], ids[4], extra[0], extra[1]};
+        assert_order(host, created_asc, 9); assert_preserved(host, full, ids[0], position, loaded);
+        queue_model_sort(host->model, QUEUE_SORT_CREATED_DESC); settle(host);
+        int64_t created_desc[] = {ids[4], ids[2], ids[1], extra[3], ids[0], ids[3], extra[2], extra[0], extra[1]};
+        assert_order(host, created_desc, 9); assert_preserved(host, full, ids[0], position, loaded);
+    }
+    queue_model_remove(host->model, extra, G_N_ELEMENTS(extra)); settle(host);
+    g_assert_cmpint(g_chdir(cwd), ==, 0);
+    if (pwd) g_assert_cmpint(setenv("PWD", pwd, 1), ==, 0);
+    else g_assert_cmpint(unsetenv("PWD"), ==, 0);
+    assert_preserved(host, original, ids[0], position, loaded);
+}
+
+/* Do not dispatch GLib completion sources after the native directory reply:
+ * the file worker is running or its result is queued, giving a deterministic
+ * point for membership changes and destruction without adding test hooks. */
+static void launch_date_worker(Host *host)
+{
+    queue_model_sort(host->model, QUEUE_SORT_MODIFIED_ASC);
+    gint64 deadline = g_get_monotonic_time() + 3000000;
+    for (;;) {
+        mpv_event *event = mpv_wait_event(host->mpv, .005);
+        mpv_event_property *property = event->event_id == MPV_EVENT_GET_PROPERTY_REPLY ? event->data : NULL;
+        gboolean directory = property && g_str_equal(property->name, "working-directory");
+        dispatch_event(host, event);
+        if (directory) { g_assert_true(queue_model_busy(host->model)); return; }
+        if (g_get_monotonic_time() > deadline) g_error("Date metadata worker did not launch.");
+    }
+}
+
+static void check_date_worker_lifetime(Host *host, const char *playlist, const char *base)
+{
+    const char *load[] = {"loadlist", playlist, "append", NULL};
+    g_assert_cmpint(mpv_command(host->mpv, load), >=, 0);
+    launch_date_worker(host);
+    const char *append[] = {"loadfile", base, "append", NULL};
+    g_assert_cmpint(mpv_command(host->mpv, append), >=, 0);
+    g_autoptr(GPtrArray) expected = snapshot(host->mpv);
+    g_assert_cmpuint(expected->len, ==, 6);
+    settle(host);
+    g_assert_nonnull(host->error); /* Membership changes abort before any move. */
+    g_clear_pointer(&host->error, g_free);
+    g_autoptr(GPtrArray) actual = snapshot(host->mpv);
+    g_assert_cmpuint(actual->len, ==, expected->len);
+    for (guint i = 0; i < actual->len; ++i)
+        g_assert_cmpint(((Entry *)actual->pdata[i])->id, ==, ((Entry *)expected->pdata[i])->id);
+    launch_date_worker(host);
+    queue_model_free(host->model); host->model = NULL;
+    guint changes = host->changed;
+    gint64 deadline = g_get_monotonic_time() + 200000;
+    while (g_get_monotonic_time() < deadline) poll_host(host);
+    g_assert_cmpuint(host->changed, ==, changes);
+    g_assert_null(host->error);
+}
+
 static void remove_tree(const char *path)
 {
     GStatBuf status;
@@ -217,10 +327,32 @@ int main(void)
     paths[3] = g_strdup(paths[0]);
     const char *titles[] = {"track 10", "Track 2", "Alpha 3", "Same title", "track 1"};
     g_autoptr(GString) list = g_string_new("#EXTM3U\n");
+    g_autofree char *bytes = NULL; gsize size = 0;
+    g_assert_true(g_file_get_contents(base, &bytes, &size, NULL));
+    const time_t modified[] = {3000, 1000, 4000, 3000, 2000};
+    gboolean birthtime = TRUE;
+    struct statx_timestamp previous_birth = {0};
     for (guint i = 0; i < G_N_ELEMENTS(paths); ++i) {
-        if (i != 3) g_assert_cmpint(link(base, paths[i]), ==, 0);
+        if (i != 3) {
+            g_assert_true(g_file_set_contents(paths[i], bytes, size, NULL));
+            struct timespec times[] = {{.tv_sec = modified[i]}, {.tv_sec = modified[i]}};
+            g_assert_cmpint(utimensat(AT_FDCWD, paths[i], times, 0), ==, 0);
+            struct statx status = {0};
+            if (statx(AT_FDCWD, paths[i], 0, STATX_BTIME, &status) != 0 || !(status.stx_mask & STATX_BTIME))
+                birthtime = FALSE;
+            else if (birthtime) {
+                g_assert_true(status.stx_btime.tv_sec > previous_birth.tv_sec ||
+                    (status.stx_btime.tv_sec == previous_birth.tv_sec && status.stx_btime.tv_nsec > previous_birth.tv_nsec));
+                previous_birth = status.stx_btime;
+            }
+            g_usleep(5000);
+        }
         g_string_append_printf(list, "#EXTINF:-1,%s\n%s\n", titles[i], paths[i]);
     }
+    /* Make the oldest file's ctime newest: creation sorting must still use
+     * birth time, and must leave unavailable creation dates unknown. */
+    g_assert_cmpint(g_chmod(paths[0], 0660), ==, 0);
+    g_assert_cmpint(g_chmod(paths[0], 0600), ==, 0);
     g_autofree char *playlist = g_build_filename(directory, "queue.m3u", NULL);
     g_assert_true(g_file_set_contents(playlist, list->str, list->len, NULL));
 
@@ -277,6 +409,8 @@ int main(void)
     g_assert_cmpint(((Entry *)path_descending->pdata[3])->id, ==, ids[1]);
     g_assert_cmpint(((Entry *)path_descending->pdata[4])->id, ==, ids[2]);
     assert_preserved(&host, original, ids[0], position, loaded);
+    check_dates(&host, original, ids, position, loaded, birthtime);
+    check_date_paths(&host, directory, paths[0], original, ids, position, loaded, birthtime);
     queue_model_shuffle(host.model); settle(&host);
     assert_preserved(&host, original, ids[0], position, loaded);
 
@@ -327,13 +461,10 @@ int main(void)
     g_assert_cmpuint(queue_model_entries(host.model)->len, ==, 0);
     for (guint i = 0; i < 5; ++i) g_assert_true(g_file_test(paths[i], G_FILE_TEST_IS_REGULAR));
 
-    /* A model can disappear while an async refresh is still queued. */
-    queue_model_sort(host.model, QUEUE_SORT_TITLE_ASC);
-    queue_model_free(host.model); host.model = NULL;
-    for (guint i = 0; i < 4; ++i) poll_host(&host);
+    check_date_worker_lifetime(&host, playlist, base);
     mpv_terminate_destroy(host.mpv); g_free(host.error);
     for (guint i = 0; i < 5; ++i) g_free(paths[i]);
     remove_tree(directory);
-    puts("PASS queue model: stable duplicate IDs, reorder, natural sorting, shuffle, repeat, multi-remove, stale IDs, clear, source integrity, current playback preservation and pending teardown.");
+    puts("PASS queue model: stable duplicate IDs, reorder, natural/date sorting, real birthtime versus ctime, URI/relative/missing/network dates, shuffle, repeat, multi-remove, stale IDs, clear, playback preservation and date-worker races/teardown.");
     return 0;
 }

@@ -8,8 +8,8 @@ typedef struct {
     GtkWindow *window;
     GtkStack *stack;
     GtkListBox *sidebar;
-    GtkWidget *sections[6];
-    gboolean section_built[6];
+    GtkWidget *sections[7];
+    gboolean section_built[7];
     GtkWidget *keys_page;
     GtkDropDown *hwdec, *language, *gpu_api;
     GtkDropDown *audio_output, *audio_device;
@@ -80,7 +80,7 @@ static const char *const extension_options[] = {
 };
 
 static const char *const section_names[] = {
-    "video", "audio", "subtitles", "playback", "keys", "interface"
+    "video", "audio", "subtitles", "playback", "keys", "interface", "misc"
 };
 
 static void ensure_section(Preferences *p, const char *name);
@@ -1544,11 +1544,29 @@ static void build_interface(Preferences *p)
         tr("Добавляет открытые или перетащенные файлы в очередь; имеет приоритет над заменой. Пустой плеер всегда начинает воспроизведение."));
 }
 
+static void build_misc(Preferences *p)
+{
+    GtkWidget *misc = page(p->sections[6], tr("Разное"));
+    const char *filenames[] = {"mpv.conf", "input.conf"};
+    const char *labels[] = {tr("Открыть mpv.conf"), tr("Открыть input.conf")};
+    const char *descriptions[] = {
+        tr("Настройки mpv и профили. Файл находится рядом с плеером."),
+        tr("Пользовательские сочетания клавиш mpv. Файл находится рядом с плеером.")
+    };
+    for (guint i = 0; i < G_N_ELEMENTS(filenames); ++i) {
+        GtkWidget *button = gtk_button_new_with_label(labels[i]);
+        gtk_widget_set_sensitive(button, p->on_open_config != NULL);
+        g_object_set_data(G_OBJECT(button), "mpv-config-filename", (gpointer)filenames[i]);
+        g_signal_connect(button, "clicked", G_CALLBACK(open_config), p);
+        row(misc, filenames[i], descriptions[i], button);
+    }
+}
+
 static void ensure_section(Preferences *p, const char *name)
 {
     void (*const builders[])(Preferences *) = {
         build_video, build_audio, build_subtitles, build_playback,
-        build_keys, build_interface
+        build_keys, build_interface, build_misc
     };
     for (guint i = 0; i < G_N_ELEMENTS(section_names); ++i) {
         if (g_strcmp0(name, section_names[i]) != 0 || !p->sections[i] ||
@@ -1573,6 +1591,7 @@ GtkWindow *preferences_window_new(GtkWindow *parent,
                                   PreferencesOpenConfigFunc on_open_config,
                                   gpointer user_data)
 {
+    (void)config_path;
     g_return_val_if_fail(values != NULL, NULL);
     GtkWindow *window = GTK_WINDOW(gtk_window_new());
     gtk_window_set_title(window, tr("Настройки"));
@@ -1623,12 +1642,12 @@ GtkWindow *preferences_window_new(GtkWindow *parent,
 
     const char *titles[] = {
         tr("Видео"), tr("Звук"), tr("Субтитры"), tr("Воспроизведение"),
-        tr("Клавиши"), tr("Интерфейс")
+        tr("Клавиши"), tr("Интерфейс"), tr("Разное")
     };
     const char *icons[] = {
         "video-display-symbolic", "audio-volume-high-symbolic",
         "media-view-subtitles-symbolic", "media-playback-start-symbolic",
-        "input-keyboard-symbolic", "preferences-system-symbolic"
+        "input-keyboard-symbolic", "preferences-system-symbolic", "document-open-symbolic"
     };
     for (guint i = 0; i < G_N_ELEMENTS(section_names); ++i) {
         p->sections[i] = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
@@ -1637,41 +1656,6 @@ GtkWindow *preferences_window_new(GtkWindow *parent,
     g_signal_connect(sidebar, "row-selected", G_CALLBACK(section_selected), p);
     g_signal_connect(stack, "notify::visible-child-name",
                      G_CALLBACK(section_visible_changed), p);
-
-    gtk_box_append(GTK_BOX(layout), gtk_separator_new(GTK_ORIENTATION_HORIZONTAL));
-    GtkWidget *footer = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 18);
-    gtk_widget_add_css_class(footer, "preferences-footer");
-    gtk_widget_set_margin_start(footer, 18);
-    gtk_widget_set_margin_end(footer, 18);
-    gtk_widget_set_margin_top(footer, 12);
-    gtk_widget_set_margin_bottom(footer, 12);
-    GtkWidget *config_labels = gtk_box_new(GTK_ORIENTATION_VERTICAL, 4);
-    gtk_widget_set_hexpand(config_labels, TRUE);
-    GtkWidget *saved = gtk_label_new(tr("Изменения сохраняются автоматически."));
-    gtk_label_set_xalign(GTK_LABEL(saved), 0);
-    gtk_label_set_wrap(GTK_LABEL(saved), TRUE);
-    gtk_box_append(GTK_BOX(config_labels), saved);
-    GtkWidget *path = gtk_label_new(config_path ? config_path : "");
-    gtk_label_set_xalign(GTK_LABEL(path), 0);
-    gtk_label_set_ellipsize(GTK_LABEL(path), PANGO_ELLIPSIZE_MIDDLE);
-    gtk_label_set_selectable(GTK_LABEL(path), TRUE);
-    gtk_widget_set_tooltip_text(path, config_path);
-    gtk_widget_add_css_class(path, "dim-label");
-    gtk_box_append(GTK_BOX(config_labels), path);
-    gtk_box_append(GTK_BOX(footer), config_labels);
-    GtkWidget *buttons = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
-    gtk_widget_set_valign(buttons, GTK_ALIGN_CENTER);
-    const char *filenames[] = {"mpv.conf", "input.conf"};
-    const char *button_labels[] = {tr("Открыть mpv.conf"), tr("Открыть input.conf")};
-    for (guint i = 0; i < G_N_ELEMENTS(filenames); ++i) {
-        GtkWidget *button = gtk_button_new_with_label(button_labels[i]);
-        gtk_widget_set_sensitive(button, on_open_config != NULL);
-        g_object_set_data(G_OBJECT(button), "mpv-config-filename", (gpointer)filenames[i]);
-        g_signal_connect(button, "clicked", G_CALLBACK(open_config), p);
-        gtk_box_append(GTK_BOX(buttons), button);
-    }
-    gtk_box_append(GTK_BOX(footer), buttons);
-    gtk_box_append(GTK_BOX(layout), footer);
 
     GtkGesture *click = gtk_gesture_click_new();
     gtk_event_controller_set_propagation_phase(GTK_EVENT_CONTROLLER(click), GTK_PHASE_CAPTURE);

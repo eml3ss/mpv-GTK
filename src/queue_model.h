@@ -14,7 +14,9 @@ typedef struct {
 
 typedef enum {
     QUEUE_SORT_TITLE_ASC, QUEUE_SORT_TITLE_DESC,
-    QUEUE_SORT_PATH_ASC, QUEUE_SORT_PATH_DESC
+    QUEUE_SORT_PATH_ASC, QUEUE_SORT_PATH_DESC,
+    QUEUE_SORT_CREATED_ASC, QUEUE_SORT_CREATED_DESC,
+    QUEUE_SORT_MODIFIED_ASC, QUEUE_SORT_MODIFIED_DESC
 } QueueSort;
 
 /* All calls and callbacks belong on the GTK/main context. Playlist snapshots
@@ -37,6 +39,9 @@ void queue_model_remove(QueueModel *model, const int64_t *ids, gsize count);
 void queue_model_move(QueueModel *model, int64_t id, int64_t before_id);
 /* Clear the entire queue and stop playback; source files are never deleted. */
 void queue_model_clear(QueueModel *model);
+/* Date sorts inspect local files on a cancellable worker only when requested.
+ * Creation means birth time, with no ctime/mtime fallback. Unknown dates sort
+ * last in both directions; ties retain the current native queue order. */
 void queue_model_sort(QueueModel *model, QueueSort sort);
 void queue_model_shuffle(QueueModel *model);
 void queue_model_set_repeat(QueueModel *model, gboolean enabled);

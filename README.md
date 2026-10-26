@@ -45,7 +45,7 @@ Use `make uninstall` to remove the application while keeping your settings.
 
 `mpv.conf`, `input.conf`, and `interface.conf` live beside the executable:
 in `build/` when running locally, or `~/.local/share/mpv-gtk/` after installation.
-Updates preserve existing settings. The settings window includes buttons to
+Updates preserve existing settings. The Misc settings section includes buttons to
 open `mpv.conf` and `input.conf`.
 
 ## Credits
