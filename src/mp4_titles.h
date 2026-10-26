@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: GPL-2.0-or-later */
 #ifndef MP4_TITLES_H
 #define MP4_TITLES_H
 #include <stddef.h>

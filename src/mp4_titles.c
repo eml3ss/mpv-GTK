@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: GPL-2.0-or-later */
 #define _GNU_SOURCE
 #define _FILE_OFFSET_BITS 64
 #include "mp4_titles.h"
