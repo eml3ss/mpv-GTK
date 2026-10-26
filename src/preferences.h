@@ -35,14 +35,16 @@ typedef struct {
     gboolean allow_replace;
     gboolean add_to_queue;
     gboolean timeline_previews;
+    /* Startup-only queue sorting, -1 unchanged or queue sort mode 0..7. */
+    int queue_sort;
     double audio_delay;
     double sub_delay;
     double sub_scale;
     double cursor_hide_delay;
 } PreferenceValues;
 
-/* Values have libmpv's usual representation: int for FLAG, double for
- * DOUBLE, and a pointer to const char * for STRING. They are valid only
+/* Values have libmpv's usual representation: int for FLAG, int64_t for INT64,
+ * double for DOUBLE, and a pointer to const char * for STRING. They are valid only
  * during the callback; asynchronous libmpv setters copy them immediately.
  * GPU API emits a synchronous pair: gpu-api then opengl-es. The host stages
  * the first value and commits both options together upon the second callback. */

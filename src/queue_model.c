@@ -44,6 +44,7 @@ struct QueueModel {
     int64_t entry_id, before_id;
     guint remove_cursor, commands, command_limit;
     QueueSort sort;
+    int sort_mode;
     gboolean started, resume_sent, stopped;
 };
 
@@ -110,6 +111,11 @@ static void changed(QueueModel *m)
 
 static void finish(QueueModel *m, const char *error)
 {
+    if (!error && m->action == ACTION_SORT && m->entries->len)
+        m->sort_mode = m->sort;
+    else if (!m->entries->len || (!error && (m->action == ACTION_SHUFFLE ||
+             (m->action == ACTION_MOVE && m->started))))
+        m->sort_mode = -1;
     m->action = ACTION_NONE;
     m->request = REQUEST_NONE;
     m->request_id = 0;
@@ -131,6 +137,7 @@ QueueModel *queue_model_new(mpv_handle *mpv, void (*changed_cb)(gpointer),
     m->mpv = mpv;
     m->entries = g_ptr_array_new_with_free_func(entry_free);
     m->repeat = g_strdup("no");
+    m->sort_mode = -1;
     m->changed = changed_cb;
     m->error = error_cb;
     m->data = data;
@@ -140,6 +147,7 @@ QueueModel *queue_model_new(mpv_handle *mpv, void (*changed_cb)(gpointer),
 const GPtrArray *queue_model_entries(const QueueModel *m) { return m ? m->entries : NULL; }
 gboolean queue_model_busy(const QueueModel *m) { return m && m->action != ACTION_NONE; }
 const char *queue_model_repeat(const QueueModel *m) { return m ? m->repeat : "no"; }
+int queue_model_sort_mode(const QueueModel *m) { return m ? m->sort_mode : -1; }
 
 void queue_model_update(QueueModel *m, const mpv_node *playlist)
 {
@@ -165,7 +173,12 @@ void queue_model_update(QueueModel *m, const mpv_node *playlist)
             g_ptr_array_add(entries, entry);
         }
     }
-    gboolean equal = entries->len == m->entries->len;
+    gboolean same_order = entries->len == m->entries->len;
+    for (guint i = 0; same_order && i < entries->len; ++i) {
+        const QueueEntry *a = entries->pdata[i], *b = m->entries->pdata[i];
+        same_order = a->id == b->id;
+    }
+    gboolean equal = same_order;
     for (guint i = 0; equal && i < entries->len; ++i) {
         const QueueEntry *a = entries->pdata[i], *b = m->entries->pdata[i];
         equal = a->id == b->id && a->current == b->current &&
@@ -175,6 +188,8 @@ void queue_model_update(QueueModel *m, const mpv_node *playlist)
         g_ptr_array_unref(entries);
         return;
     }
+    if (!same_order || !entries->len)
+        m->sort_mode = -1;
     g_ptr_array_unref(m->entries);
     m->entries = entries;
     changed(m);

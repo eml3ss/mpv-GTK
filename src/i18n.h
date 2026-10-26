@@ -35,4 +35,9 @@ gboolean i18n_save_add_to_queue(gboolean enabled, GError **error);
 gboolean i18n_timeline_previews(void);
 gboolean i18n_save_timeline_previews(gboolean enabled, GError **error);
 
+/* Default queue order at startup: -1 keeps mpv's order, 0..7 are the queue
+ * title/path/created/modified sorts in ascending/descending pairs. */
+int i18n_queue_sort(void);
+gboolean i18n_save_queue_sort(int mode, GError **error);
+
 #endif

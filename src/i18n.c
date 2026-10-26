@@ -16,6 +16,11 @@ static double cursor_hide_delay = 3.0;
 static gboolean allow_replace = TRUE;
 static gboolean add_to_queue;
 static gboolean timeline_previews = TRUE;
+static int queue_sort = -1;
+static const char *const queue_sort_names[] = {
+    "none", "title-asc", "title-desc", "path-asc", "path-desc",
+    "created-asc", "created-desc", "modified-asc", "modified-desc"
+};
 static GHashTable *translations;
 static gboolean translations_attempted;
 
@@ -139,6 +144,7 @@ gboolean i18n_init(const char *mpv_config_path, GError **error)
     allow_replace = TRUE;
     add_to_queue = FALSE;
     timeline_previews = TRUE;
+    queue_sort = -1;
     g_clear_pointer(&interface_path, g_free);
     if (!mpv_config_path || !*mpv_config_path) {
         g_set_error_literal(error, G_FILE_ERROR, G_FILE_ERROR_INVAL,
@@ -158,6 +164,13 @@ gboolean i18n_init(const char *mpv_config_path, GError **error)
     allow_replace = load_boolean(file, "allow-replace", TRUE);
     add_to_queue = load_boolean(file, "add-to-queue", FALSE);
     timeline_previews = load_boolean(file, "timeline-previews", TRUE);
+    g_autofree char *sort = g_key_file_get_string(file, "Interface", "queue-sort", NULL);
+    for (guint i = 0; sort && i < G_N_ELEMENTS(queue_sort_names); ++i) {
+        if (g_str_equal(sort, queue_sort_names[i])) {
+            queue_sort = (int)i - 1;
+            break;
+        }
+    }
     return TRUE;
 }
 
@@ -274,5 +287,23 @@ gboolean i18n_timeline_previews(void)
 gboolean i18n_save_timeline_previews(gboolean enabled, GError **error)
 {
     return save_boolean("timeline-previews", enabled, &timeline_previews, error);
+}
+
+int i18n_queue_sort(void)
+{
+    return queue_sort;
+}
+
+gboolean i18n_save_queue_sort(int mode, GError **error)
+{
+    if (!interface_path || mode < -1 || mode > 7) {
+        g_set_error_literal(error, G_FILE_ERROR, G_FILE_ERROR_INVAL,
+                            "Initialize UI preferences and select a valid queue sort before saving");
+        return FALSE;
+    }
+    if (!save_value("queue-sort", queue_sort_names[mode + 1], error))
+        return FALSE;
+    queue_sort = mode;
+    return TRUE;
 }
 

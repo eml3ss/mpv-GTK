@@ -21,7 +21,7 @@ typedef struct {
     PreferenceValues values;
     GtkSwitch *keepaspect, *deinterlace, *deband, *loop;
     GtkSwitch *allow_replace, *add_to_queue, *timeline_previews;
-    GtkDropDown *autocreate_playlist, *directory_mode;
+    GtkDropDown *autocreate_playlist, *directory_mode, *queue_sort;
     GPtrArray *autocreate_values, *directory_values;
     GtkLabel *autocreate_description, *directory_description;
     GtkEntry *directory_filter_types;
@@ -939,6 +939,17 @@ static void changed_language(GObject *object, GParamSpec *property, gpointer dat
     p->on_change("ui-language", MPV_FORMAT_STRING, &code, p->user_data);
 }
 
+static void changed_queue_sort(GObject *object, GParamSpec *property, gpointer data)
+{
+    (void)property;
+    Preferences *p = data;
+    guint selected = gtk_drop_down_get_selected(GTK_DROP_DOWN(object));
+    if (p->updating || !p->on_change || selected > 8)
+        return;
+    int64_t mode = (int64_t)selected - 1;
+    p->on_change("ui-queue-sort", MPV_FORMAT_INT64, &mode, p->user_data);
+}
+
 static void changed_gpu_api(GObject *object, GParamSpec *property, gpointer data)
 {
     (void)property;
@@ -1158,6 +1169,11 @@ static void refresh_controls(Preferences *p, const char *section)
     if (p->loop && (!section || g_str_equal(section, "playback")))
         gtk_switch_set_active(p->loop, values->loop);
     if (!section || g_str_equal(section, "playback")) {
+        if (p->queue_sort) {
+            int mode = values->queue_sort >= -1 && values->queue_sort <= 7
+                     ? values->queue_sort : -1;
+            gtk_drop_down_set_selected(p->queue_sort, (guint)(mode + 1));
+        }
         const char *autocreate_labels[] = {tr("Отключено"), tr("Выбранные типы"), tr("Тот же тип файла")};
         const char *directory_labels[] = {tr("Авто"), tr("Отложенно"), tr("Рекурсивно"), tr("Игнорировать подпапки")};
         update_playlist_choice(p, p->autocreate_playlist, values->autocreate_playlist,
@@ -1464,6 +1480,18 @@ static void build_playback(Preferences *p)
     GtkWidget *playback = page(p->sections[3], tr("Воспроизведение"));
     p->loop = add_switch(p, playback, "loop-file", tr("Повторять текущий файл"),
         tr("После окончания начинает текущий файл заново."));
+    const char *sort_labels[] = {
+        tr("Не изменять порядок"),
+        tr("Название: А–Я"), tr("Название: Я–А"),
+        tr("Путь: А–Я"), tr("Путь: Я–А"),
+        tr("Дата создания: сначала старые"), tr("Дата создания: сначала новые"),
+        tr("Дата изменения: сначала старые"), tr("Дата изменения: сначала новые"), NULL
+    };
+    p->queue_sort = GTK_DROP_DOWN(gtk_drop_down_new_from_strings(sort_labels));
+    row(playback, tr("Сортировка очереди при запуске"),
+        tr("Применяется при следующем запуске плеера. Текущая очередь не меняется."),
+        GTK_WIDGET(p->queue_sort));
+    g_signal_connect(p->queue_sort, "notify::selected", G_CALLBACK(changed_queue_sort), p);
     GtkWidget *content = gtk_widget_get_parent(playback);
     GtkWidget *title = gtk_label_new(tr("Автосоздание плейлиста"));
     gtk_label_set_xalign(GTK_LABEL(title), 0);

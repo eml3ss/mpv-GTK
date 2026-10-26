@@ -6,14 +6,15 @@ playback changes. Ctrl-click adds individual entries to the selection,
 Shift-click selects a range, and Ctrl+A selects the visible entries. This
 explicit selection stays in place while playback changes. Delete or the remove
 button removes the selected entries from the queue. Files on disk are unchanged.
+Drag the divider between the video and queue to resize the panel. Its width
+is retained when the panel is closed and reopened within the same window.
 
 Drag an entry by its handle to move it before or after another entry. The grab
 area extends around the small grip, and neighboring entries animate aside to
-open the insertion slot. The insertion line shows its destination. Search
-matches titles and paths without changing the underlying queue. Dragging or
-removing filtered results still
-targets the original entries, including when the same file occurs more than
-once.
+open a gap the height of a complete entry. The insertion line shows its
+destination. Search matches titles and paths without changing the underlying
+queue. Dragging or removing filtered results still targets the original
+entries, including when the same file occurs more than once.
 
 The sorting menu orders the whole queue by title, path, creation date, or
 modification date in either direction. Titles and paths use natural numeric
@@ -21,8 +22,15 @@ ordering. Dates are read on demand for local files; entries without the
 requested date, including network URLs, stay after dated entries in both
 directions. Creation sorting uses the file's actual birth time when available.
 Shuffle randomizes the whole queue once.
+The selected sort mode is marked in the sorting menu. Reordering or shuffling
+clears the marker when the order becomes custom.
 Repeat loops the whole queue using mpv's playlist repeat setting. Reordering,
 sorting, and shuffling keep the current file and playback position.
+
+Playback settings include **Queue sorting at startup**. The choice applies to
+the initial queue on the next player launch and keeps the current playing
+file. **Keep original order** disables startup sorting. Changing this
+preference does not reorder the active queue.
 
 Clear stops playback and empties the entire queue. Removing the currently
 playing entry lets mpv advance to the next one. Queue editing controls are

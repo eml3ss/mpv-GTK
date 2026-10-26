@@ -41,7 +41,7 @@
 #include "queue_view.h"
 
 #define APP_ID "io.github.emless.mpvgtk"
-#define APP_VERSION "0.22.4"
+#define APP_VERSION "0.22.5"
 #define APP_ICON_NAME APP_ID
 #define HWDEC_REFRESH_ID UINT64_C(10001)
 #define HWDEC_SET_ID UINT64_C(10002)
@@ -192,6 +192,10 @@ typedef struct {
     AudioScrub *audio_scrub;
     QueueModel *queue_model;
     QueueView *queue_view;
+    GtkPaned *queue_paned;
+    int queue_width, initial_queue_sort;
+    guint initial_queue_sort_source;
+    gboolean initial_queue_sort_pending;
     guint scrub_release_source;
     guint mpris_source;
     GtkWidget *previous_button, *next_button, *chapter_button;
@@ -953,6 +957,40 @@ static void queue_model_error(const char *message, gpointer data)
         show_error(p, message);
 }
 
+static QueueModel *ensure_queue_model(Player *p)
+{
+    if (!p->queue_model && p->mpv)
+        p->queue_model = queue_model_new(p->mpv, queue_model_changed, queue_model_error, p);
+    return p->queue_model;
+}
+
+static gboolean apply_initial_queue_sort(gpointer data)
+{
+    Player *p = data;
+    p->initial_queue_sort_source = 0;
+    if (p->closing || p->quit_requested || !p->mpv)
+        return G_SOURCE_REMOVE;
+    QueueModel *model = ensure_queue_model(p);
+    if (model && !queue_model_busy(model))
+        queue_model_sort(model, (QueueSort)p->initial_queue_sort);
+    return G_SOURCE_REMOVE;
+}
+
+static void restore_queue_width(Player *p)
+{
+    if (!p->queue_paned || !p->queue_view) return;
+    int width = gtk_widget_get_width(GTK_WIDGET(p->queue_paned));
+    if (width <= 0) return;
+    int side = p->queue_width > 0 ? p->queue_width : 326;
+    gtk_paned_set_position(p->queue_paned, MAX(160, width - side));
+}
+
+static void queue_paned_mapped(GtkWidget *widget, gpointer data)
+{
+    (void)widget;
+    restore_queue_width(data);
+}
+
 static void update_playlist(Player *p, mpv_node *node)
 {
     if (p->queue_model && p->playlist_observed)
@@ -978,20 +1016,27 @@ static void queue_reveal_changed(GObject *object, GParamSpec *spec, gpointer dat
         return;
     gboolean visible = gtk_revealer_get_reveal_child(GTK_REVEALER(p->sidebar));
     if (visible && !p->queue_view && p->mpv) {
-        if (!p->queue_model)
-            p->queue_model = queue_model_new(p->mpv, queue_model_changed, queue_model_error, p);
-        p->queue_view = queue_view_new(p->queue_model);
+        p->queue_view = queue_view_new(ensure_queue_model(p));
         p->playlist = queue_view_list(p->queue_view);
         p->queue_label = queue_view_count_label(p->queue_view);
         gtk_revealer_set_child(GTK_REVEALER(p->sidebar), queue_view_widget(p->queue_view));
+        gtk_widget_set_visible(p->sidebar, TRUE);
+        restore_queue_width(p);
+    }
+    if (!visible && p->queue_view && p->queue_paned) {
+        int width = gtk_widget_get_width(GTK_WIDGET(p->queue_paned));
+        int position = gtk_paned_get_position(p->queue_paned);
+        if (width > 0 && position >= 0) p->queue_width = width - position;
     }
     const ObservedProperty properties[] = {
         {"playlist", MPV_FORMAT_NODE}, {"loop-playlist", MPV_FORMAT_STRING}
     };
     observe_group(p, properties, G_N_ELEMENTS(properties), PLAYLIST_OBSERVE_ID,
                   visible, &p->playlist_observed);
-    if (!visible && !gtk_revealer_get_child_revealed(GTK_REVEALER(p->sidebar)))
+    if (!visible && !gtk_revealer_get_child_revealed(GTK_REVEALER(p->sidebar))) {
         release_queue_view(p);
+        gtk_widget_set_visible(p->sidebar, FALSE);
+    }
 }
 
 static void add_target_item(GMenu *menu, const char *label, const char *action,
@@ -1545,6 +1590,11 @@ static void handle_event(Player *p, mpv_event *event)
         if (p->preferences)
             preferences_window_update(p->preferences, &p->preference_values);
         present_startup_window(p);
+        if (p->initial_queue_sort_pending && !p->initial_queue_sort_source) {
+            p->initial_queue_sort_pending = FALSE;
+            p->initial_queue_sort_source = g_idle_add_full(G_PRIORITY_DEFAULT_IDLE,
+                apply_initial_queue_sort, p, NULL);
+        }
         break;
     case MPV_EVENT_END_FILE: {
         p->media_loading = FALSE;
@@ -2681,6 +2731,19 @@ static void preference_changed(const char *name, mpv_format format, const void *
         if (p->preferences) preferences_window_update(p->preferences, &p->preference_values);
         return;
     }
+    if (g_str_equal(name, "ui-queue-sort")) {
+        if (format != MPV_FORMAT_INT64 || !value) return;
+        int64_t mode = *(const int64_t *)value;
+        g_autoptr(GError) error = NULL;
+        if (mode < -1 || mode > QUEUE_SORT_MODIFIED_DESC ||
+            !i18n_save_queue_sort((int)mode, &error)) {
+            if (error) show_error(p, error->message);
+        }
+        p->preference_values.queue_sort = i18n_queue_sort();
+        if (p->preferences)
+            preferences_window_update(p->preferences, &p->preference_values);
+        return;
+    }
     if (g_str_equal(name, "ui-allow-replace") || g_str_equal(name, "ui-add-to-queue")) {
         gboolean allow = g_str_equal(name, "ui-allow-replace");
         gboolean enabled = !!*(const int *)value;
@@ -3487,6 +3550,10 @@ static void prepare_close(Player *p)
     if (p->close_prepared)
         return;
     p->close_prepared = TRUE;
+    if (p->initial_queue_sort_source) {
+        g_source_remove(p->initial_queue_sort_source);
+        p->initial_queue_sort_source = 0;
+    }
     scrub_cancel(p);
     p->quit_requested = TRUE;
     if (p->mpris_source) { g_source_remove(p->mpris_source); p->mpris_source = 0; }
@@ -4054,14 +4121,22 @@ static void activate(GtkApplication *application, gpointer data)
     gtk_widget_set_hexpand(p->stage, TRUE);
     gtk_widget_set_vexpand(p->stage, TRUE);
     gtk_box_append(GTK_BOX(root), p->stage);
-    GtkWidget *body = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+    GtkWidget *body = gtk_paned_new(GTK_ORIENTATION_HORIZONTAL);
+    p->queue_paned = GTK_PANED(body);
+    gtk_widget_add_css_class(body, "queue-split");
+    gtk_paned_set_wide_handle(p->queue_paned, TRUE);
+    gtk_paned_set_resize_start_child(p->queue_paned, TRUE);
+    gtk_paned_set_resize_end_child(p->queue_paned, FALSE);
+    gtk_paned_set_shrink_start_child(p->queue_paned, TRUE);
+    gtk_paned_set_shrink_end_child(p->queue_paned, FALSE);
+    g_signal_connect(body, "map", G_CALLBACK(queue_paned_mapped), p);
     gtk_widget_set_vexpand(body, TRUE);
     gtk_overlay_set_child(GTK_OVERLAY(p->stage), body);
     GtkWidget *overlay = gtk_overlay_new();
     p->video_overlay = overlay;
     gtk_widget_set_hexpand(overlay, TRUE);
     gtk_widget_set_vexpand(overlay, TRUE);
-    gtk_box_append(GTK_BOX(body), overlay);
+    gtk_paned_set_start_child(p->queue_paned, overlay);
     p->area = GTK_GL_AREA(gtk_gl_area_new());
     p->video_widget = GTK_WIDGET(p->area);
     gtk_widget_set_visible(p->video_widget, FALSE);
@@ -4105,10 +4180,11 @@ static void activate(GtkApplication *application, gpointer data)
 
     p->sidebar = gtk_revealer_new();
     gtk_revealer_set_transition_type(GTK_REVEALER(p->sidebar),
-                                      GTK_REVEALER_TRANSITION_TYPE_SLIDE_LEFT);
+                                      GTK_REVEALER_TRANSITION_TYPE_NONE);
+    gtk_widget_set_visible(p->sidebar, FALSE);
     g_signal_connect(p->sidebar, "notify::reveal-child", G_CALLBACK(queue_reveal_changed), p);
     g_signal_connect(p->sidebar, "notify::child-revealed", G_CALLBACK(queue_reveal_changed), p);
-    gtk_box_append(GTK_BOX(body), p->sidebar);
+    gtk_paned_set_end_child(p->queue_paned, p->sidebar);
     startup_trace_mark("GTK video widgets constructed");
 
     p->controls_revealer = gtk_revealer_new();
@@ -4410,9 +4486,10 @@ static void activate(GtkApplication *application, gpointer data)
         ".queue-editor .queue-selection-bar button.queue-action {"
         "min-height: 20px; padding: 2px 6px; }"
         ".queue-editor .queue-row-body { transition: transform 160ms cubic-bezier(.2,.9,.25,1.12), opacity 100ms ease; }"
-        ".queue-editor .queue-row-body.queue-shift-up { transform: translate(0,-10px); }"
-        ".queue-editor .queue-row-body.queue-shift-down { transform: translate(0,10px); }"
-        ".queue-editor .queue-row-body.queue-drag-source { opacity: .35; }"
+        ".queue-editor .queue-row-body.queue-drag-source { opacity: 0; }"
+        ".queue-editor .queue-sort-option.queue-sort-active { color: @accent_color; background: alpha(@accent_bg_color,.12); }"
+        ".queue-split > separator { min-width: 6px; background: alpha(@window_fg_color,.06); }"
+        ".queue-split > separator:hover { background: alpha(@accent_bg_color,.20); }"
         ".queue-editor.queue-dragging .queue-entry:selected { background: transparent; }"
         ".queue-editor.queue-dragging .queue-entry:selected > .queue-row-body {"
         "background: alpha(@accent_bg_color,.30); border-radius: 7px; }"
@@ -4506,6 +4583,9 @@ int main(int argc, char **argv)
     p.preference_values.allow_replace = i18n_allow_replace();
     p.preference_values.add_to_queue = i18n_add_to_queue();
     p.preference_values.timeline_previews = i18n_timeline_previews();
+    p.preference_values.queue_sort = i18n_queue_sort();
+    p.initial_queue_sort = p.preference_values.queue_sort;
+    p.initial_queue_sort_pending = p.initial_queue_sort >= 0;
     /* GTK must not change the numeric locale while early demuxing runs on
      * libmpv's threads. Keep the desktop's other locale categories intact. */
     setlocale(LC_ALL, "");
@@ -4569,6 +4649,7 @@ int main(int argc, char **argv)
     int status = g_application_run(G_APPLICATION(p.application), 1, argv);
     startup_trace_mark("GTK application loop finished");
     p.closing = TRUE;
+    if (p.initial_queue_sort_source) g_source_remove(p.initial_queue_sort_source);
     release_queue_view(&p);
     queue_model_free(p.queue_model);
     p.queue_model = NULL;

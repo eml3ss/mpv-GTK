@@ -26,6 +26,8 @@ QueueModel *queue_model_new(mpv_handle *mpv, void (*changed)(gpointer),
 const GPtrArray *queue_model_entries(const QueueModel *model);
 gboolean queue_model_busy(const QueueModel *model);
 const char *queue_model_repeat(const QueueModel *model);
+/* Last successfully applied sort, or -1 for a custom/unset queue order. */
+int queue_model_sort_mode(const QueueModel *model);
 void queue_model_update(QueueModel *model, const mpv_node *playlist);
 void queue_model_set_position(QueueModel *model, int64_t position);
 void queue_model_update_repeat(QueueModel *model, const char *value);
