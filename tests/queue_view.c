@@ -152,6 +152,41 @@ int main(void)
     gtk_label_set_text(GTK_LABEL(title), short_title);
     g_assert_cmpint(gtk_list_box_get_selection_mode(GTK_LIST_BOX(list)), ==, GTK_SELECTION_MULTIPLE);
     g_assert_true(gtk_list_box_get_activate_on_single_click(GTK_LIST_BOX(list)));
+    /* GtkListBox's single-click activation can leave previous rows selected
+     * in multiple-selection mode. Ordinary activation must replace that
+     * selection, including while an unrelated queue operation is pending. */
+    settle(host); assert_ok(host);
+    gtk_list_box_unselect_all(GTK_LIST_BOX(list));
+    gtk_list_box_select_row(GTK_LIST_BOX(list), row_named(test.view, "Alpha"));
+    gtk_list_box_select_row(GTK_LIST_BOX(list), row_named(test.view, "Бета"));
+    queue_model_set_repeat(host->model, TRUE);
+    g_assert_true(queue_model_busy(host->model));
+    g_signal_emit_by_name(list, "row-activated", row_named(test.view, "Other"));
+    g_assert_cmpuint(selection_count(test.view), ==, 1);
+    g_assert_true(gtk_list_box_row_is_selected(row_named(test.view, "Other")));
+    g_assert_false(gtk_list_box_row_is_selected(row_named(test.view, "Alpha")));
+    g_assert_false(gtk_list_box_row_is_selected(row_named(test.view, "Бета")));
+    g_signal_emit_by_name(list, "row-activated", row_named(test.view, "Alpha copy"));
+    g_assert_cmpuint(selection_count(test.view), ==, 1);
+    g_assert_true(gtk_list_box_row_is_selected(row_named(test.view, "Alpha copy")));
+    g_assert_false(gtk_list_box_row_is_selected(row_named(test.view, "Other")));
+    settle(host); assert_ok(host);
+    g_assert_cmpuint(selection_count(test.view), ==, 1);
+    g_assert_true(gtk_list_box_row_is_selected(row_named(test.view, "Alpha copy")));
+    queue_model_set_repeat(host->model, FALSE); settle(host); assert_ok(host);
+    /* Next/automatic advance must move playback-following selection too,
+     * rather than leave a green background on the previously clicked row. */
+    queue_model_set_position(host->model, -1);
+    queue_model_set_position(host->model,
+        gtk_list_box_row_get_index(row_named(test.view, "Other")));
+    g_assert_cmpuint(selection_count(test.view), ==, 1);
+    g_assert_true(gtk_list_box_row_is_selected(row_named(test.view, "Other")));
+    g_assert_false(gtk_list_box_row_is_selected(row_named(test.view, "Alpha copy")));
+    queue_model_set_position(host->model,
+        gtk_list_box_row_get_index(row_named(test.view, "Alpha")));
+    g_assert_cmpuint(selection_count(test.view), ==, 1);
+    g_assert_true(gtk_list_box_row_is_selected(row_named(test.view, "Alpha")));
+    g_assert_false(gtk_list_box_row_is_selected(row_named(test.view, "Other")));
     /* The core may already mark an idle first entry current; initial view
      * selection is independent of this explicit two-entry selection check. */
     gtk_list_box_unselect_all(GTK_LIST_BOX(list));
@@ -166,6 +201,7 @@ int main(void)
      * every missing local file is an unknown date, so this is a stable no-op. */
     g_signal_emit_by_name(find_button(root, date_labels[3]), "clicked"); settle(host); assert_ok(host);
     g_assert_cmpuint(selection_count(test.view), ==, 2);
+    queue_model_set_position(host->model, -1);
     queue_model_set_position(host->model, 0);
     GtkListBoxRow *first = gtk_list_box_get_row_at_index(GTK_LIST_BOX(list), 0);
     g_assert_true(gtk_widget_has_css_class(GTK_WIDGET(first), "queue-current"));

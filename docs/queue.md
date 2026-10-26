@@ -1,9 +1,10 @@
 # Queue editor
 
 Open the queue with its toolbar button or Ctrl+P. Click an entry or press
-Enter to play it. Ctrl-click adds individual entries
-to the selection, Shift-click selects a range, and Ctrl+A selects the visible
-entries. Delete or the remove button removes the selected entries from the
+Enter to play it. An ordinary click replaces the selection, which then follows
+playback changes. Ctrl-click adds individual entries to the selection,
+Shift-click selects a range, and Ctrl+A selects the visible entries. This
+explicit selection stays in place while playback changes. Delete or the remove button removes the selected entries from the
 queue. Files on disk are unchanged.
 
 Drag an entry by its handle to move it before or after another entry. The

@@ -42,8 +42,9 @@ struct QueueView {
     GPtrArray *rows;
     char *query;
     guint restore_source, click_reset_source;
+    int64_t current_id;
     double scroll_position;
-    gboolean updating, rebuilding, selection_click;
+    gboolean updating, rebuilding, selection_click, manual_selection;
 };
 
 static char *search_text(const char *text)
@@ -137,7 +138,10 @@ static void selection_changed(GtkListBox *list, gpointer data)
 {
     (void)list;
     QueueView *view = data;
-    if (!view->rebuilding) update_actions(view);
+    if (!view->rebuilding && !view->updating) {
+        view->manual_selection = TRUE;
+        update_actions(view);
+    }
 }
 
 static void update_placeholder(QueueView *view)
@@ -270,10 +274,19 @@ static gboolean list_click_event(GtkEventControllerLegacy *controller, GdkEvent 
 
 static void row_activated(GtkListBox *list, GtkListBoxRow *widget, gpointer data)
 {
-    (void)list;
     QueueView *view = data;
     QueueRow *row = g_object_get_data(G_OBJECT(widget), "mpv-queue-row");
-    if (row && !view->selection_click && !queue_model_busy(view->model))
+    if (!row || view->selection_click)
+        return;
+    /* GTK's single-click activation adds to a multiple selection. Ordinary
+     * playback activation should leave only its target selected. */
+    view->manual_selection = FALSE;
+    view->updating = TRUE;
+    gtk_list_box_unselect_all(list);
+    gtk_list_box_select_row(list, widget);
+    view->updating = FALSE;
+    update_actions(view);
+    if (!queue_model_busy(view->model))
         queue_model_play(view->model, row->id);
 }
 
@@ -550,6 +563,7 @@ void queue_view_refresh(QueueView *view)
     if (rebuild) {
         g_autoptr(GArray) selected = selected_ids(view);
         gboolean first = view->rows->len == 0;
+        if (first) view->manual_selection = FALSE;
         GtkRoot *root = gtk_widget_get_root(view->root);
         GtkWidget *focus = root ? gtk_root_get_focus(root) : NULL;
         gboolean had_list_focus = focus &&
@@ -580,12 +594,14 @@ void queue_view_refresh(QueueView *view)
                 (ids_contain(selected, entry->id) || (first && entry->current)))
                 gtk_list_box_select_row(GTK_LIST_BOX(view->list), GTK_LIST_BOX_ROW(row->row));
         }
-        view->rebuilding = FALSE;
         if (had_list_focus)
             gtk_widget_grab_focus(focus_target ? focus_target : first_visible ? first_visible : view->list);
+        view->rebuilding = FALSE;
         if (view->restore_source) g_source_remove(view->restore_source);
         view->restore_source = g_idle_add_full(G_PRIORITY_LOW, restore_scroll, view, NULL);
     }
+    int64_t current_id = -1;
+    GtkListBoxRow *current_row = NULL;
     for (guint i = 0; i < count; ++i) {
         const QueueEntry *entry = g_ptr_array_index(entries, i);
         QueueRow *row = g_ptr_array_index(view->rows, i);
@@ -593,6 +609,19 @@ void queue_view_refresh(QueueView *view)
         gtk_label_set_text(GTK_LABEL(row->index), index);
         if (entry->current) gtk_widget_add_css_class(row->row, "queue-current");
         else gtk_widget_remove_css_class(row->row, "queue-current");
+        if (entry->current) {
+            current_id = entry->id;
+            current_row = row_matches(view, row) ? GTK_LIST_BOX_ROW(row->row) : NULL;
+        }
+    }
+    if (!queue_model_busy(view->model) && view->current_id != current_id) {
+        view->current_id = current_id;
+        if (!view->manual_selection) {
+            view->updating = TRUE;
+            gtk_list_box_unselect_all(GTK_LIST_BOX(view->list));
+            if (current_row) gtk_list_box_select_row(GTK_LIST_BOX(view->list), current_row);
+            view->updating = FALSE;
+        }
     }
     g_autofree char *count_text = g_strdup_printf(tr("Очередь · %d"), (int)count);
     gtk_label_set_text(GTK_LABEL(view->count), count_text);
@@ -636,6 +665,7 @@ QueueView *queue_view_new(QueueModel *model)
     g_return_val_if_fail(model != NULL, NULL);
     QueueView *view = g_new0(QueueView, 1);
     view->model = model;
+    view->current_id = -1;
     view->rows = g_ptr_array_new();
     view->drag_token = g_object_new(G_TYPE_OBJECT, NULL);
     view->root = g_object_ref_sink(gtk_box_new(GTK_ORIENTATION_VERTICAL, 0));
