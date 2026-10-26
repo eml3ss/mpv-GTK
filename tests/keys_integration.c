@@ -640,7 +640,11 @@ int main(void)
     press_fullscreen_key(&host, "F11", FALSE);
     assert_fullscreen(&host, FALSE);
     press_pause_key(&host, "MBTN_RIGHT", TRUE);
-    press_pause_key(&host, "MBTN_RIGHT", FALSE);
+    /* GTK identifies the second nearby click as a double-click. With no
+     * explicit double binding, it must still use the current right action. */
+    press_pause_key(&host, "MBTN_RIGHT_DBL", FALSE);
+    press_pause_key(&host, "MBTN_RIGHT", TRUE);
+    press_pause_key(&host, "MBTN_RIGHT_DBL", FALSE);
 
     /* Focused media keys work before the optional key catalog is loaded. */
     press_pause_key(&host, "PLAY", TRUE);
@@ -676,15 +680,24 @@ int main(void)
     /* Right mouse follows the same input.conf precedence and live editing
      * path as keyboard bindings; no GTK mouse event is synthesized here. */
     edit(&host, "MBTN_RIGHT", "MBTN_RIGHT", "set volume 29", FALSE);
-    press_volume(&host, "MBTN_RIGHT", 29);
+    press_volume(&host, "MBTN_RIGHT_DBL", 29);
     assert_pause(&host, FALSE);
     edit(&host, "MBTN_RIGHT", "MBTN_RIGHT", "ignore", FALSE);
-    press_volume(&host, "MBTN_RIGHT", 29);
+    press_volume(&host, "MBTN_RIGHT_DBL", 29);
     press_volume(&host, "UP", 34); /* Bound commands run after keypress acknowledgements. */
     assert_pause(&host, FALSE);
     edit(&host, "MBTN_RIGHT", "MBTN_RIGHT", NULL, TRUE);
     g_assert_true(binding(&host, "MBTN_RIGHT")->app_default);
     press_pause_key(&host, "MBTN_RIGHT", TRUE);
+    press_pause_key(&host, "MBTN_RIGHT_DBL", FALSE);
+
+    /* An explicit double-click binding replaces the fallback independently
+     * of the ordinary right-click action. */
+    edit(&host, "MBTN_RIGHT_DBL", "MBTN_RIGHT_DBL", "set volume 41", FALSE);
+    press_volume(&host, "MBTN_RIGHT_DBL", 41);
+    assert_pause(&host, FALSE);
+    edit(&host, "MBTN_RIGHT_DBL", "MBTN_RIGHT_DBL", NULL, TRUE);
+    press_pause_key(&host, "MBTN_RIGHT_DBL", TRUE);
     press_pause_key(&host, "MBTN_RIGHT", FALSE);
 
     edit(&host, "SPACE", "SPACE", "set volume 23", FALSE);
@@ -802,7 +815,7 @@ int main(void)
     g_assert_cmpint(g_remove(config), ==, 0);
     g_assert_cmpint(g_remove(input), ==, 0);
     g_assert_cmpint(g_rmdir(directory), ==, 0);
-    puts("PASS key host integration: mouse pause defaults/overrides, F11 fullscreen, rapid speed/reset, "
+    puts("PASS key host integration: single/double mouse pause defaults/overrides, F11 fullscreen, rapid speed/reset, "
          "two-track subtitle cycle/initial reset, async editing, section priority, "
          "recorded Shift/Alt keys live and after reopening");
     return 0;

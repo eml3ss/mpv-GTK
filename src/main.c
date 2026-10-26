@@ -39,7 +39,7 @@
 #include "audio_scrub.h"
 
 #define APP_ID "io.github.emless.mpvgtk"
-#define APP_VERSION "0.21.8"
+#define APP_VERSION "0.21.9"
 #define APP_ICON_NAME APP_ID
 #define HWDEC_REFRESH_ID UINT64_C(10001)
 #define HWDEC_SET_ID UINT64_C(10002)
@@ -103,6 +103,7 @@ static const KeyBindingDefault app_key_defaults[] = {
     {"Shift+F10", "script-message mpv-gtk context-menu", "Контекстное меню выбранной кнопки"},
     {"MBTN_LEFT", "script-message mpv-gtk focus-video", "Выбрать область видео"},
     {"MBTN_RIGHT", "cycle pause", "Пауза / воспроизведение"},
+    {"MBTN_RIGHT_DBL", "keypress MBTN_RIGHT", "Пауза / воспроизведение"},
     {"MBTN_LEFT_DBL", "cycle fullscreen", "Полный экран"}
 };
 
@@ -811,8 +812,16 @@ static char *format_time(double seconds)
 static void update_time(Player *p, double position)
 {
     if (trim_mode_active(p->trim)) {
+        if (gtk_widget_has_css_class(p->time_label, "clickable-time")) {
+            gtk_widget_remove_css_class(p->time_label, "clickable-time");
+            gtk_widget_set_cursor_from_name(p->time_label, NULL);
+        }
         trim_mode_position(p->trim, position, p->timeline.paused);
         return;
+    }
+    if (!gtk_widget_has_css_class(p->time_label, "clickable-time")) {
+        gtk_widget_add_css_class(p->time_label, "clickable-time");
+        gtk_widget_set_cursor_from_name(p->time_label, "pointer");
     }
     gboolean known_duration = isfinite(p->timeline.duration) && p->timeline.duration > 0;
     double shown = p->time_remaining
@@ -4165,6 +4174,8 @@ static void activate(GtkApplication *application, gpointer data)
     gtk_box_append(GTK_BOX(transport), audio_time);
     p->time_label = gtk_label_new("00:00 / --:--");
     gtk_widget_add_css_class(p->time_label, "timecode");
+    gtk_widget_add_css_class(p->time_label, "clickable-time");
+    gtk_widget_set_cursor_from_name(p->time_label, "pointer");
     gtk_widget_set_margin_start(p->time_label, 5);
     translated_tooltip(p->time_label, "Переключить текущее и оставшееся время");
     GtkGesture *time_click = gtk_gesture_click_new();
@@ -4244,10 +4255,11 @@ static void activate(GtkApplication *application, gpointer data)
     gtk_box_append(GTK_BOX(transport), p->speed_button);
     g_signal_connect(p->subtitle_button, "notify::active", G_CALLBACK(controls_interaction_changed), p);
     g_signal_connect(p->speed_button, "notify::active", G_CALLBACK(controls_interaction_changed), p);
-    gtk_box_append(GTK_BOX(transport), icon_button("view-list-symbolic",
-        "Очередь · Ctrl+P", "app.queue"));
+    GtkWidget *queue_button = icon_button("view-list-symbolic",
+        "Очередь · Ctrl+P", "app.queue");
+    gtk_box_append(GTK_BOX(transport), queue_button);
     p->chapter_button = chapters_button_new(select_chapter, step_chapter, p);
-    gtk_widget_set_valign(p->chapter_button, GTK_ALIGN_CENTER);
+    gtk_widget_set_valign(p->chapter_button, GTK_ALIGN_FILL);
     gtk_widget_add_css_class(p->chapter_button, "chapter-menu");
     translated_tooltip(p->chapter_button,
         "Главы · Ctrl+Page Up / Ctrl+Page Down\nПКМ — следующая глава");
@@ -4282,9 +4294,13 @@ static void activate(GtkApplication *application, gpointer data)
     GtkWidget *fullscreen_button = icon_button("view-fullscreen-symbolic",
         "Полный экран · F", "app.fullscreen");
     gtk_image_set_pixel_size(GTK_IMAGE(gtk_button_get_child(GTK_BUTTON(fullscreen_button))), 18);
-    gtk_widget_set_size_request(fullscreen_button, 36, 36);
-    gtk_widget_set_valign(fullscreen_button, GTK_ALIGN_CENTER);
     gtk_box_append(GTK_BOX(transport), fullscreen_button);
+    g_autoptr(GtkSizeGroup) footer_button_size = gtk_size_group_new(GTK_SIZE_GROUP_BOTH);
+    GtkWidget *footer_buttons[] = {queue_button,
+        gtk_widget_get_first_child(p->chapter_button), trim_mode_button(p->trim),
+        info, fullscreen_button};
+    for (guint i = 0; i < G_N_ELEMENTS(footer_buttons); ++i)
+        gtk_size_group_add_widget(footer_button_size, footer_buttons[i]);
     startup_trace_mark("GTK controls constructed");
 
     GtkEventController *keys = gtk_event_controller_key_new();
@@ -4331,6 +4347,7 @@ static void activate(GtkApplication *application, gpointer data)
         ".compact-menu > button:hover { background: alpha(@window_fg_color,.08); }"
         ".active-track > button { color: @accent_color; background: alpha(@accent_bg_color,.12); }"
         ".timecode { font-variant-numeric: tabular-nums; font-family: 'Adwaita Sans', sans-serif; }"
+        ".clickable-time:hover { color: @accent_color; }"
         ".controls button.trim-active { color: @accent_color; background: alpha(@accent_bg_color,.14); }"
         ".trim-time { min-height: 26px; padding: 2px 8px; border-radius: 7px; }"
         ".trim-controls { padding: 2px 0; }"
@@ -4386,7 +4403,7 @@ static void activate(GtkApplication *application, gpointer data)
         "popover.trim-audio-popover > contents { margin: 0 8px; }"
         ".controls .chapter-menu > button, .controls .chapter-menu > button:checked {"
         "background: transparent; box-shadow: none; color: @window_fg_color;"
-        "border-color: transparent; padding: 4px; min-width: 24px; min-height: 24px; border-radius: 8px; }"
+        "border-color: transparent; padding: 4px; min-width: 24px; min-height: 24px; border-radius: 9px; }"
         ".controls .chapter-menu > button:hover, .controls .chapter-menu > button:checked:hover {"
         "background: alpha(@window_fg_color,.08); }"
         "popover.chapters-popover > contents { padding: 4px; }"
