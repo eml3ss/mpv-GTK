@@ -151,7 +151,7 @@ int main(void)
     g_assert_false(gtk_widget_compute_expand(root, GTK_ORIENTATION_HORIZONTAL));
     gtk_label_set_text(GTK_LABEL(title), short_title);
     g_assert_cmpint(gtk_list_box_get_selection_mode(GTK_LIST_BOX(list)), ==, GTK_SELECTION_MULTIPLE);
-    g_assert_false(gtk_list_box_get_activate_on_single_click(GTK_LIST_BOX(list)));
+    g_assert_true(gtk_list_box_get_activate_on_single_click(GTK_LIST_BOX(list)));
     /* The core may already mark an idle first entry current; initial view
      * selection is independent of this explicit two-entry selection check. */
     gtk_list_box_unselect_all(GTK_LIST_BOX(list));

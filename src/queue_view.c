@@ -41,9 +41,9 @@ struct QueueView {
     GObject *drag_token;
     GPtrArray *rows;
     char *query;
-    guint restore_source;
+    guint restore_source, click_reset_source;
     double scroll_position;
-    gboolean updating, rebuilding;
+    gboolean updating, rebuilding, selection_click;
 };
 
 static char *search_text(const char *text)
@@ -212,12 +212,69 @@ static void sort_clicked(GtkButton *button, gpointer data)
     if (!queue_model_busy(view->model)) queue_model_sort(view->model, sort);
 }
 
+static void cancel_click_reset(QueueView *view)
+{
+    if (view->click_reset_source) {
+        g_source_remove(view->click_reset_source);
+        view->click_reset_source = 0;
+    }
+}
+
+static void reset_click_policy(QueueView *view)
+{
+    cancel_click_reset(view);
+    view->selection_click = FALSE;
+    gtk_list_box_set_activate_on_single_click(GTK_LIST_BOX(view->list), TRUE);
+}
+
+static gboolean reset_click_idle(gpointer data)
+{
+    QueueView *view = data;
+    view->click_reset_source = 0;
+    reset_click_policy(view);
+    return G_SOURCE_REMOVE;
+}
+
+static void list_unmapped(GtkWidget *widget, gpointer data)
+{
+    (void)widget;
+    reset_click_policy(data);
+}
+
+static gboolean list_click_event(GtkEventControllerLegacy *controller, GdkEvent *event,
+                                  gpointer data)
+{
+    (void)controller;
+    QueueView *view = data;
+    GdkEventType type = gdk_event_get_event_type(event);
+    if (type == GDK_KEY_PRESS || type == GDK_GRAB_BROKEN || type == GDK_TOUCH_CANCEL) {
+        reset_click_policy(view);
+    } else if ((type == GDK_BUTTON_PRESS || type == GDK_BUTTON_RELEASE) &&
+               gdk_button_event_get_button(event) == GDK_BUTTON_PRIMARY) {
+        if (type == GDK_BUTTON_PRESS) {
+            cancel_click_reset(view);
+            view->selection_click = (gdk_event_get_modifier_state(event) &
+                                     (GDK_CONTROL_MASK | GDK_SHIFT_MASK)) != 0;
+            /* GTK's single-click path bypasses its modifier-selection logic.
+             * Choose the native selection path before GTK handles this press. */
+            gtk_list_box_set_activate_on_single_click(GTK_LIST_BOX(view->list),
+                                                      !view->selection_click);
+        } else if (!view->click_reset_source) {
+            /* Keep the press policy through GTK's release handler. */
+            view->click_reset_source = g_idle_add_full(G_PRIORITY_HIGH_IDLE,
+                reset_click_idle, view, NULL);
+        }
+    }
+    return FALSE;
+}
+
 static void row_activated(GtkListBox *list, GtkListBoxRow *widget, gpointer data)
 {
     (void)list;
     QueueView *view = data;
     QueueRow *row = g_object_get_data(G_OBJECT(widget), "mpv-queue-row");
-    if (row && !queue_model_busy(view->model)) queue_model_play(view->model, row->id);
+    if (row && !view->selection_click && !queue_model_busy(view->model))
+        queue_model_play(view->model, row->id);
 }
 
 static gboolean key_pressed(GtkEventControllerKey *controller, guint key,
@@ -652,9 +709,14 @@ QueueView *queue_view_new(QueueModel *model)
     view->list = gtk_list_box_new();
     gtk_widget_add_css_class(view->list, "queue-rows");
     gtk_list_box_set_selection_mode(GTK_LIST_BOX(view->list), GTK_SELECTION_MULTIPLE);
-    gtk_list_box_set_activate_on_single_click(GTK_LIST_BOX(view->list), FALSE);
+    gtk_list_box_set_activate_on_single_click(GTK_LIST_BOX(view->list), TRUE);
+    GtkEventController *clicks = gtk_event_controller_legacy_new();
+    gtk_event_controller_set_propagation_phase(clicks, GTK_PHASE_CAPTURE);
+    g_signal_connect(clicks, "event", G_CALLBACK(list_click_event), view);
+    gtk_widget_add_controller(view->list, clicks);
+    g_signal_connect(view->list, "unmap", G_CALLBACK(list_unmapped), view);
     gtk_list_box_set_filter_func(GTK_LIST_BOX(view->list), filter_row, view, NULL);
-    tooltip(view->list, "Двойной щелчок — воспроизвести\nCtrl/Shift — выбрать несколько\nDelete — удалить выбранное");
+    tooltip(view->list, "Один щелчок — воспроизвести\nCtrl/Shift — выбрать несколько\nDelete — удалить выбранное");
     g_signal_connect(view->list, "row-activated", G_CALLBACK(row_activated), view);
     g_signal_connect(view->list, "selected-rows-changed", G_CALLBACK(selection_changed), view);
     view->placeholder = gtk_label_new(NULL);
@@ -670,9 +732,10 @@ QueueView *queue_view_new(QueueModel *model)
     gtk_box_append(GTK_BOX(view->root), view->scroller);
     gtk_box_append(GTK_BOX(view->root), gtk_separator_new(GTK_ORIENTATION_HORIZONTAL));
     GtkWidget *footer = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+    gtk_widget_add_css_class(footer, "queue-selection-bar");
     horizontal_margins(footer);
-    gtk_widget_set_margin_top(footer, 8);
-    gtk_widget_set_margin_bottom(footer, 8);
+    gtk_widget_set_margin_top(footer, 4);
+    gtk_widget_set_margin_bottom(footer, 4);
     view->selected = gtk_label_new(NULL);
     gtk_label_set_xalign(GTK_LABEL(view->selected), 0);
     gtk_widget_add_css_class(view->selected, "dim-label");
@@ -716,6 +779,7 @@ void queue_view_free(QueueView *view)
 {
     if (!view) return;
     if (view->restore_source) g_source_remove(view->restore_source);
+    cancel_click_reset(view);
     view->rebuilding = TRUE;
     /* The host removes the root from its revealer before dropping this ref. */
     g_object_unref(view->root);

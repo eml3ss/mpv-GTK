@@ -1,7 +1,7 @@
 # Queue editor
 
-Open the queue with its toolbar button or Ctrl+P. Click an entry to select it;
-double-click it or press Enter to play it. Ctrl-click adds individual entries
+Open the queue with its toolbar button or Ctrl+P. Click an entry or press
+Enter to play it. Ctrl-click adds individual entries
 to the selection, Shift-click selects a range, and Ctrl+A selects the visible
 entries. Delete or the remove button removes the selected entries from the
 queue. Files on disk are unchanged.

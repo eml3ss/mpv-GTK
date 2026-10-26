@@ -41,7 +41,7 @@
 #include "queue_view.h"
 
 #define APP_ID "io.github.emless.mpvgtk"
-#define APP_VERSION "0.22.1"
+#define APP_VERSION "0.22.2"
 #define APP_ICON_NAME APP_ID
 #define HWDEC_REFRESH_ID UINT64_C(10001)
 #define HWDEC_SET_ID UINT64_C(10002)
@@ -4407,6 +4407,8 @@ static void activate(GtkApplication *application, gpointer data)
         "border-color: transparent; padding: 4px; min-width: 24px; min-height: 24px; border-radius: 9px; }"
         ".controls .chapter-menu > button:hover, .controls .chapter-menu > button:checked:hover {"
         "background: alpha(@window_fg_color,.08); }"
+        ".queue-editor .queue-selection-bar button.queue-action {"
+        "min-height: 20px; padding: 2px 6px; }"
         "popover.chapters-popover > contents { padding: 4px; }"
         "list.chapters-list { padding: 0; }"
         "list.chapters-list > row { min-height: 0; padding: 2px 6px; margin: 1px 0; border-radius: 5px; }"
