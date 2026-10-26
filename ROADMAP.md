@@ -31,8 +31,9 @@ from unfinished interface work. Item 16 is tentative.
 
 ## 5. Desktop integration through MPRIS
 
-- [ ] Expose playback state, metadata, and controls through MPRIS.
-- [ ] Support desktop media controls, media keys routed by the desktop, and playerctl.
+- [x] Expose playback state, metadata, and controls through MPRIS.
+- [x] Support desktop media controls, media keys routed by the desktop, and playerctl.
+- [x] Supply local-video thumbnails, audio cover art, and a player-icon fallback to desktop media widgets.
 
 ## 6. Prevent screen blanking during playback
 

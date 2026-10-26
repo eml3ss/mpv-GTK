@@ -10,6 +10,7 @@ independently of the video's frame rate.
 - Switch to [Trim Mode](docs/trim-mode.md) for lossless video cuts.
 - Preview local video frames on [timeline hover](docs/timeline-previews.md).
 - View playback statistics and resume playback with mpv's watch-later support.
+- Control playback from desktop media widgets and [playerctl through MPRIS](docs/mpris.md).
 - English and Russian interface, with colors from your GTK theme.
 
 See the [roadmap](ROADMAP.md) for planned features and implementation progress.

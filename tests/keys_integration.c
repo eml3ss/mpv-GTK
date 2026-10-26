@@ -641,6 +641,11 @@ int main(void)
     assert_fullscreen(&host, FALSE);
     press_pause_key(&host, "MBTN_RIGHT", TRUE);
     press_pause_key(&host, "MBTN_RIGHT", FALSE);
+
+    /* Focused media keys work before the optional key catalog is loaded. */
+    press_pause_key(&host, "PLAY", TRUE);
+    press_pause_key(&host, "PAUSE", TRUE);
+    press_pause_key(&host, "PLAY", FALSE);
     check_quick_speed(&host);
     g_assert_cmpuint(host.snapshots, ==, 0);
     g_assert_false(p->keys_loaded);
@@ -661,6 +666,12 @@ int main(void)
     g_assert_false(binding(&host, "q")->active);
     g_assert_true(binding(&host, "MBTN_RIGHT")->app_default);
     g_assert_cmpstr(binding(&host, "MBTN_RIGHT")->command, ==, "cycle pause");
+
+    const char *media_keys[] = {"PLAY", "PAUSE", "STOP", "PREV", "NEXT"};
+    for (guint i = 0; i < G_N_ELEMENTS(media_keys); ++i) {
+        g_assert_true(binding(&host, media_keys[i])->app_default);
+        g_assert_true(binding(&host, media_keys[i])->active);
+    }
 
     /* Right mouse follows the same input.conf precedence and live editing
      * path as keyboard bindings; no GTK mouse event is synthesized here. */

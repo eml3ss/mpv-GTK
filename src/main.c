@@ -34,9 +34,11 @@
 #include "track_notice.h"
 #include "trim.h"
 #include "seek_preview.h"
+#include "mpris.h"
+#include "mpris_art.h"
 
 #define APP_ID "io.github.emless.mpvgtk"
-#define APP_VERSION "0.20.2"
+#define APP_VERSION "0.21.0"
 #define APP_ICON_NAME APP_ID
 #define HWDEC_REFRESH_ID UINT64_C(10001)
 #define HWDEC_SET_ID UINT64_C(10002)
@@ -65,6 +67,11 @@
 static const KeyBindingDefault app_key_defaults[] = {
     {"SPACE", "cycle pause", "Пауза / воспроизведение"},
     {"k", "cycle pause", "Пауза / воспроизведение"},
+    {"PLAY", "cycle pause", "Пауза / воспроизведение"},
+    {"PAUSE", "set pause yes", "Пауза"},
+    {"STOP", "stop keep-playlist", "Остановить воспроизведение"},
+    {"PREV", "playlist-prev", "Предыдущий файл"},
+    {"NEXT", "playlist-next", "Следующий файл"},
     {"f", "cycle fullscreen", "Полный экран"},
     {"F11", "cycle fullscreen", "Полный экран"},
     {"ESC", "script-message mpv-gtk escape", "Закрыть информацию или выйти из полного экрана"},
@@ -176,6 +183,9 @@ typedef struct {
     GtkWidget *title, *time_label, *play_button, *play_icon, *mute_button, *root;
     TrimMode *trim;
     SeekPreview *seek_preview;
+    Mpris *mpris;
+    MprisArt *mpris_art;
+    guint mpris_source;
     GtkWidget *previous_button, *next_button, *chapter_button;
     GtkWidget *seek, *seek_overlay, *volume, *playlist, *sidebar, *stage, *video_overlay;
     GtkWidget *info_overlay;
@@ -272,6 +282,7 @@ static void discard_render_frame(Player *p);
 static void clear_track_notices(Player *p);
 static void hide_track_notice(Player *p);
 static void request_track_notice(Player *p, gboolean audio, gboolean silent);
+static gboolean start_mpris_idle(gpointer data);
 
 static GtkWidget *player_video_widget(Player *p)
 {
@@ -293,6 +304,7 @@ static void present_startup_window(Player *p)
     p->startup_presented = TRUE;
     startup_trace_mark("window presentation requested");
     gtk_window_present(p->window);
+    p->mpris_source = g_idle_add_full(G_PRIORITY_DEFAULT_IDLE, start_mpris_idle, p, NULL);
 }
 
 static gboolean playback_info_visible(Player *p)
@@ -1402,6 +1414,8 @@ static void handle_event(Player *p, mpv_event *event)
     if (p->quit_requested && event->event_id != MPV_EVENT_HOOK &&
         event->event_id != MPV_EVENT_END_FILE && event->event_id != MPV_EVENT_SHUTDOWN)
         return;
+    if (mpris_handle_event(p->mpris, event)) return;
+    if (mpris_art_handle_event(p->mpris_art, event)) return;
     if (seek_preview_handle_event(p->seek_preview, event)) return;
     gboolean trimming = trim_mode_active(p->trim);
     if (trim_mode_handle_event(p->trim, event)) {
@@ -2059,6 +2073,56 @@ static gboolean open_paths(Player *p, GPtrArray *paths)
     if (player_video_widget(p))
         gtk_widget_grab_focus(player_video_widget(p));
     return TRUE;
+}
+
+static void mpris_raise_window(gpointer data)
+{
+    Player *p = data;
+    if (p->startup_presented && !p->closing && !p->quit_requested)
+        gtk_window_present(p->window);
+}
+
+static void mpris_quit_player(gpointer data)
+{
+    Player *p = data;
+    if (!p->closing && !p->quit_requested) gtk_window_close(p->window);
+}
+
+static void mpris_fullscreen_window(gboolean fullscreen, gpointer data)
+{
+    Player *p = data;
+    if (!p->closing && !p->quit_requested) set_fullscreen(p, fullscreen);
+}
+
+static gboolean mpris_open_media(const char *uri, gpointer data)
+{
+    Player *p = data;
+    if (!p->mpv || p->closing || p->quit_requested) return FALSE;
+    g_autoptr(GFile) file = g_file_new_for_uri(uri);
+    g_autoptr(GPtrArray) paths = g_ptr_array_new_with_free_func(g_free);
+    g_ptr_array_add(paths, media_location(file));
+    /* MPRIS OpenUri explicitly requests playback of this item, rather than
+     * the configurable append/replace behavior of ordinary file opening. */
+    queue_media_paths(p, paths, FALSE);
+    return TRUE;
+}
+
+static void mpris_art_changed(const char *uri, gpointer data)
+{
+    Player *p = data;
+    if (!p->closing && !p->quit_requested && p->mpris) mpris_set_art_url(p->mpris, uri);
+}
+
+static gboolean start_mpris_idle(gpointer data)
+{
+    Player *p = data;
+    p->mpris_source = 0;
+    if (p->closing || p->quit_requested || !p->mpv) return G_SOURCE_REMOVE;
+    MprisHost host = {.raise = mpris_raise_window, .quit = mpris_quit_player,
+        .set_fullscreen = mpris_fullscreen_window, .open_uri = mpris_open_media, .data = p};
+    p->mpris = mpris_new(p->mpv, &host);
+    p->mpris_art = mpris_art_new(p->mpv, mpris_art_changed, p);
+    return G_SOURCE_REMOVE;
 }
 
 static void file_response(GObject *source, GAsyncResult *result, gpointer data)
@@ -3352,6 +3416,7 @@ static void prepare_close(Player *p)
         return;
     p->close_prepared = TRUE;
     p->quit_requested = TRUE;
+    if (p->mpris_source) { g_source_remove(p->mpris_source); p->mpris_source = 0; }
     seek_preview_shutdown(p->seek_preview);
     trim_mode_shutdown(p->trim);
     startup_trace_mark("window close requested");
@@ -3370,6 +3435,10 @@ static void prepare_close(Player *p)
     if (display)
         gdk_display_flush(display);
     startup_trace_mark("windows hidden and flushed");
+    mpris_art_free(p->mpris_art);
+    p->mpris_art = NULL;
+    mpris_free(p->mpris);
+    p->mpris = NULL;
     /* Keep closing false until the final shutdown acknowledgement so pending
      * preference edits can still be persisted before a WM-initiated quit. */
     if (p->preferences)
@@ -4381,6 +4450,11 @@ int main(int argc, char **argv)
     int status = g_application_run(G_APPLICATION(p.application), 1, argv);
     startup_trace_mark("GTK application loop finished");
     p.closing = TRUE;
+    if (p.mpris_source) g_source_remove(p.mpris_source);
+    mpris_art_free(p.mpris_art);
+    p.mpris_art = NULL;
+    mpris_free(p.mpris);
+    p.mpris = NULL;
     clear_track_notices(&p);
     cursor_timeout_cancel(&p);
     if (p.wake_source) g_source_remove(p.wake_source);

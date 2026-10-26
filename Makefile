@@ -18,10 +18,10 @@ CONFIG := build/mpv.conf
 INPUT_CONFIG := build/input.conf
 LOCALE_RESOURCE := build/locales/en.ini
 TRIM_CONFIG := build/script-opts/trim-mode.conf
-COMMON_SOURCES := src/config.c src/preferences.c src/transport.c src/i18n.c src/input.c src/key_commands.c src/keybindings.c src/keys_page.c src/about.c src/startup_trace.c src/gl_api.c src/chapters.c src/chapter_marks.c src/track_notice.c src/trim.c src/trim_backend.c src/trim_export.c src/seek_preview.c src/preview_decoder.c
+COMMON_SOURCES := src/config.c src/preferences.c src/transport.c src/i18n.c src/input.c src/key_commands.c src/keybindings.c src/keys_page.c src/about.c src/startup_trace.c src/gl_api.c src/chapters.c src/chapter_marks.c src/track_notice.c src/trim.c src/trim_backend.c src/trim_export.c src/seek_preview.c src/preview_decoder.c src/mpris.c src/mpris_art.c
 COMMON_OBJECTS := build/mpv-gtk-resources.o
 ICON_RESOURCE_FILES := $(wildcard data/icons/scalable/actions/*.svg data/icons/scalable/apps/*.svg) data/icons/LICENSE.GPL3 data/icons/NOTICE.txt data/icons/SOURCES.tsv
-HEADERS := src/timeline.h src/config.h src/preferences.h src/controls.h src/transport.h src/i18n.h src/input.h src/key_commands.h src/keybindings.h src/keys_page.h src/about.h src/startup_trace.h src/gl_api.h src/chapters.h src/chapter_marks.h src/track_notice.h src/trim.h src/trim_backend.h src/trim_export.h src/seek_preview.h src/preview_decoder.h
+HEADERS := src/timeline.h src/config.h src/preferences.h src/controls.h src/transport.h src/i18n.h src/input.h src/key_commands.h src/keybindings.h src/keys_page.h src/about.h src/startup_trace.h src/gl_api.h src/chapters.h src/chapter_marks.h src/track_notice.h src/trim.h src/trim_backend.h src/trim_export.h src/seek_preview.h src/preview_decoder.h src/mpris.h src/mpris_art.h
 STOCK_LIB := build/libmpv.so.2
 STOCK_ENGINE := build/mpv-engine
 STOCK_DATA := build/stock-mpv.json build/stock-mpv-version.txt
@@ -56,9 +56,11 @@ GL_API_TEST := build/test-gl-api
 GL_STARTUP_TEST := build/test-gl-startup
 TRIM_NATIVE_TEST := build/test-trim-native
 SEEK_PREVIEW_TEST := build/test-seek-preview
+MPRIS_TEST := build/test-mpris
+MPRIS_ART_TEST := build/test-mpris-art
 DESKTOP := build/io.github.emless.mpvgtk.desktop
 
-.PHONY: all clean test test-trim test-trim-native test-seek-preview install uninstall FORCE
+.PHONY: all clean test test-trim test-trim-native test-seek-preview test-mpris test-mpris-art install uninstall FORCE
 
 all: $(TARGET) $(CONFIG) $(INPUT_CONFIG) $(LOCALE_RESOURCE) $(TRIM_CONFIG) $(STOCK_LIB) $(STOCK_ENGINE) $(STOCK_DATA)
 
@@ -197,6 +199,24 @@ test-seek-preview: $(SEEK_PREVIEW_TEST)
 	@./$(SEEK_PREVIEW_TEST); status=$$?; \
 	if [ "$$status" -eq 77 ]; then printf '%s\n' 'Timeline preview check skipped (no usable Wayland display or FFmpeg).'; \
 	elif [ "$$status" -ne 0 ]; then exit "$$status"; fi
+
+$(MPRIS_TEST): tests/mpris.c src/mpris.c src/mpris.h $(STOCK_LIB) | build
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -o "$@" tests/mpris.c src/mpris.c $(shell $(PKG_CONFIG) --libs gio-2.0 mpv) -lm
+
+test-mpris: $(MPRIS_TEST)
+	@./$(MPRIS_TEST); status=$$?; \
+	if [ "$$status" -eq 77 ]; then printf '%s\n' 'MPRIS check skipped (FFmpeg or private D-Bus unavailable).'; \
+	elif [ "$$status" -ne 0 ]; then exit "$$status"; fi
+
+$(MPRIS_ART_TEST): tests/mpris_art.c src/mpris_art.c src/mpris_art.h src/preview_decoder.c src/preview_decoder.h $(COMMON_OBJECTS) $(STOCK_LIB) | build
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -o "$@" tests/mpris_art.c src/mpris_art.c src/preview_decoder.c $(COMMON_OBJECTS) $(shell $(PKG_CONFIG) --libs gio-2.0 gdk-pixbuf-2.0 mpv) -lm
+
+test-mpris-art: $(MPRIS_ART_TEST)
+	@./$(MPRIS_ART_TEST); status=$$?; \
+	if [ "$$status" -eq 77 ]; then printf '%s\n' 'MPRIS artwork check skipped (FFmpeg unavailable).'; \
+	elif [ "$$status" -ne 0 ]; then exit "$$status"; fi
+
+test: test-mpris test-mpris-art
 
 test-trim: all test-trim-native
 	@MPV_GTK_BINARY="$(abspath $(TARGET))" python3 tests/trim.py; \
