@@ -39,7 +39,7 @@
 #include "audio_scrub.h"
 
 #define APP_ID "io.github.emless.mpvgtk"
-#define APP_VERSION "0.21.9"
+#define APP_VERSION "0.21.10"
 #define APP_ICON_NAME APP_ID
 #define HWDEC_REFRESH_ID UINT64_C(10001)
 #define HWDEC_SET_ID UINT64_C(10002)
@@ -235,6 +235,7 @@ typedef struct {
     gboolean muted, ready, fullscreen, idle, pointer_bottom, pointer_present, controls_pressed;
     gboolean cursor_hidden;
     gboolean time_remaining;
+    gboolean volume_known;
     gboolean loaded_once, test_paused, test_seek_sent, test_resumed, seek_ok;
     gboolean test_finished, render_failed;
     double preview, volume_value, test_seconds, max_render_ms, max_tick_gap_ms;
@@ -814,14 +815,12 @@ static void update_time(Player *p, double position)
     if (trim_mode_active(p->trim)) {
         if (gtk_widget_has_css_class(p->time_label, "clickable-time")) {
             gtk_widget_remove_css_class(p->time_label, "clickable-time");
-            gtk_widget_set_cursor_from_name(p->time_label, NULL);
         }
         trim_mode_position(p->trim, position, p->timeline.paused);
         return;
     }
     if (!gtk_widget_has_css_class(p->time_label, "clickable-time")) {
         gtk_widget_add_css_class(p->time_label, "clickable-time");
-        gtk_widget_set_cursor_from_name(p->time_label, "pointer");
     }
     gboolean known_duration = isfinite(p->timeline.duration) && p->timeline.duration > 0;
     double shown = p->time_remaining
@@ -1151,6 +1150,19 @@ static void show_track_notice(Player *p, gboolean audio, const char *id)
     track_notice_show(p->track_notice, tr(audio ? "Звук" : "Субтитры"), text);
 }
 
+static void show_volume_notice(Player *p)
+{
+    if (!p->video_overlay || p->closing || p->quit_requested || !isfinite(p->volume_value))
+        return;
+    if (!p->track_notice) {
+        p->track_notice = track_notice_new(GTK_OVERLAY(p->video_overlay));
+        g_object_add_weak_pointer(G_OBJECT(p->track_notice), (gpointer *)&p->track_notice);
+    }
+    position_track_notice(p);
+    g_autofree char *text = g_strdup_printf("%s: %.0f%%", tr("Громкость"), p->volume_value);
+    track_notice_show(p->track_notice, text, NULL);
+}
+
 static void observe_track_notice(Player *p, gboolean audio, const char *id)
 {
     if (!p->timeline.loaded || p->closing || p->quit_requested || !id)
@@ -1395,11 +1407,16 @@ static void property_changed(Player *p, mpv_event_property *property)
                 gtk_widget_remove_css_class(p->speed_button, "active-track");
         }
     } else if (g_str_equal(name, "volume")) {
+        gboolean changed = p->volume_known &&
+            fabs(p->volume_value - *(double *)value) > 1e-6;
         p->volume_value = *(double *)value;
+        p->volume_known = TRUE;
         p->updating = TRUE;
         gtk_range_set_value(GTK_RANGE(p->volume), p->volume_value);
         p->updating = FALSE;
         update_transport(p);
+        if (changed)
+            show_volume_notice(p);
     } else if (g_str_equal(name, "mute")) {
         p->muted = !!*(int *)value;
         update_transport(p);
@@ -4175,7 +4192,6 @@ static void activate(GtkApplication *application, gpointer data)
     p->time_label = gtk_label_new("00:00 / --:--");
     gtk_widget_add_css_class(p->time_label, "timecode");
     gtk_widget_add_css_class(p->time_label, "clickable-time");
-    gtk_widget_set_cursor_from_name(p->time_label, "pointer");
     gtk_widget_set_margin_start(p->time_label, 5);
     translated_tooltip(p->time_label, "Переключить текущее и оставшееся время");
     GtkGesture *time_click = gtk_gesture_click_new();
