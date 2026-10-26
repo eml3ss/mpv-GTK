@@ -4,11 +4,5 @@
     "commit": "41f6a645068483470267271e1d09966ca3b9f413",
     "origin": "https://github.com/mpv-player/mpv.git",
     "path": "mpv"
-  },
-  "meson": {
-    "version": "1.9.1",
-    "sha256": "f824ab770c041a202f532f69e114c971918ed2daff7ea56583d80642564598d0",
-    "source": "https://pypi.org/pypi/meson/1.9.1/json",
-    "path": "meson"
   }
 }

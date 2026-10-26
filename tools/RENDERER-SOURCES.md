@@ -35,9 +35,10 @@ bash tools/fetch-renderer-sources.sh
 ```
 
 That command downloads the official mpv 0.41.0 source tag, pinned to commit
-`41f6a645068483470267271e1d09966ca3b9f413`, and an uninstalled Meson 1.9.1 Python
-bootstrap. Source downloads and Meson are unnecessary for the normal application
-build. The vendor checkout has been restored to the unmodified official release.
+`41f6a645068483470267271e1d09966ca3b9f413`, into `vendor/mpv` and records it in
+`vendor/renderer-sources.json`. It requires Git and does not download a build
+system. These optional upstream sources are unnecessary for the normal
+application build.
 
 The retired 0.10 custom Render API patch, changed source files, and original
 artifacts were preserved in a read-only snapshot under `build/rollback-0.10/`.

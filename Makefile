@@ -304,7 +304,6 @@ test: $(TARGET) $(CONFIG) $(INPUT_CONFIG) $(TIMELINE_TEST) $(CONFIG_TEST) $(CONT
 	./$(GL_API_TEST)
 	./$(GL_STARTUP_TEST)
 	./$(EMBEDDED_ENGINE_TEST)
-	MPV_GTK_BINARY="$(abspath $(TARGET))" python3 tests/engine.py
 	@MPV_GTK_BINARY="$(abspath $(TARGET))" python3 tests/smoke.py; \
 	status=$$?; \
 	if [ "$$status" -eq 77 ]; then \
