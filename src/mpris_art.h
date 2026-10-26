@@ -9,7 +9,7 @@ typedef void (*MprisArtCallback)(const char *uri, gpointer data);
 
 /* All public calls and callbacks use the creating main context. Callback
  * URIs are borrowed. Source sampling, decoding and image files are async.
- * Artwork fits inside 1024x1024 without enlarging smaller source images. */
+ * Artwork fits inside 341x341 without enlarging smaller source images. */
 MprisArt *mpris_art_new(mpv_handle *mpv, MprisArtCallback callback, gpointer data);
 gboolean mpris_art_handle_event(MprisArt *art, const mpv_event *event);
 void mpris_art_free(MprisArt *art);

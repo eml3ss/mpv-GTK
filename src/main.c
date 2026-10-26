@@ -38,7 +38,7 @@
 #include "mpris_art.h"
 
 #define APP_ID "io.github.emless.mpvgtk"
-#define APP_VERSION "0.21.1"
+#define APP_VERSION "0.21.2"
 #define APP_ICON_NAME APP_ID
 #define HWDEC_REFRESH_ID UINT64_C(10001)
 #define HWDEC_SET_ID UINT64_C(10002)
@@ -3943,12 +3943,17 @@ static void activate(GtkApplication *application, gpointer data)
     gtk_menu_button_set_always_show_arrow(GTK_MENU_BUTTON(p->app_menu_button), FALSE);
     gtk_menu_button_set_menu_model(GTK_MENU_BUTTON(p->app_menu_button), G_MENU_MODEL(p->app_menu));
     gtk_widget_add_css_class(p->app_menu_button, "flat");
+    gtk_widget_add_css_class(p->app_menu_button, "header-app-menu");
     gtk_widget_set_focus_on_click(p->app_menu_button, FALSE);
     translated_tooltip(p->app_menu_button, "Главное меню");
     g_signal_connect(p->app_menu_button, "notify::active", G_CALLBACK(controls_interaction_changed), p);
     gtk_header_bar_pack_end(GTK_HEADER_BAR(p->header), p->app_menu_button);
-    gtk_header_bar_pack_end(GTK_HEADER_BAR(p->header), icon_button(
-        "emblem-system-symbolic", "Настройки · Ctrl+,", "app.settings"));
+    GtkWidget *settings_button = icon_button(
+        "emblem-system-symbolic", "Настройки · Ctrl+,", "app.settings");
+    gtk_header_bar_pack_end(GTK_HEADER_BAR(p->header), settings_button);
+    g_autoptr(GtkSizeGroup) header_button_size = gtk_size_group_new(GTK_SIZE_GROUP_BOTH);
+    gtk_size_group_add_widget(header_button_size, p->app_menu_button);
+    gtk_size_group_add_widget(header_button_size, settings_button);
     startup_trace_mark("GTK header constructed");
 
     p->error_bar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
@@ -4223,7 +4228,7 @@ static void activate(GtkApplication *application, gpointer data)
     g_autoptr(GtkCssProvider) css = gtk_css_provider_new();
     gtk_css_provider_load_from_string(css,
         "window { background: @window_bg_color; color: @window_fg_color; }"
-        "headerbar .open-url-button { transform: translate(0, 1px); }"
+        "headerbar .open-url-button > image { transform: translate(0, 1px); }"
         ".controls { background: @headerbar_bg_color; color: @headerbar_fg_color;"
         "padding: 2px 12px 6px; border: none; border-top: 1px solid alpha(@window_fg_color,.08);"
         "border-radius: 0; box-shadow: none; }"
@@ -4274,6 +4279,8 @@ static void activate(GtkApplication *application, gpointer data)
      * needs matching margins so it cannot collapse the trough to zero. */
     g_autoptr(GtkCssProvider) size_css = gtk_css_provider_new();
     gtk_css_provider_load_from_string(size_css,
+        "headerbar .header-app-menu > button {"
+        "min-width: 24px; min-height: 24px; padding: 4px; }"
         ".controls .control-button, .controls .compact-menu > button {"
         "min-width: 24px; min-height: 24px; padding: 4px; }"
         ".controls .compact-menu > button { min-width: 56px; border-radius: 6px;"

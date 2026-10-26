@@ -14,8 +14,8 @@
 #define QUERY_BASE (UINT64_C(1) << 53)
 #define QUERY_LIMIT (QUERY_BASE + (UINT64_C(1) << 32))
 #define ICON_RESOURCE "/io/github/emless/mpvgtk/icons/scalable/apps/io.github.emless.mpvgtk.svg"
-#define ART_MAX_SIDE 1024
-#define ART_PIXEL_LIMIT (16 * 1024 * 1024)
+#define ART_MAX_SIDE 341
+#define ART_PIXEL_LIMIT (ART_MAX_SIDE * ART_MAX_SIDE * 4)
 
 typedef struct { const char *name; mpv_format format; } ArtProperty;
 static const ArtProperty properties[] = {

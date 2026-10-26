@@ -643,15 +643,12 @@ int main(void)
     g_assert_cmpuint(capture.gpu_writes, ==, 3);
     g_assert_cmpstr(capture.last_gpu_api, ==, "opengl");
     g_assert_cmpstr(capture.last_opengl_es, ==, "no");
-    /* Vulkan remains visible for clarity, but the embedded Render API must
-     * reject it even for direct programmatic selection. */
-    g_assert_cmpuint(g_list_model_get_n_items(gtk_drop_down_get_model(p->gpu_api)), ==, 4);
-    g_assert_cmpstr(gtk_string_list_get_string(GTK_STRING_LIST(
-        gtk_drop_down_get_model(p->gpu_api)), 3), ==, "Vulkan");
-    g_assert_nonnull(gtk_drop_down_get_list_factory(p->gpu_api));
-    gtk_drop_down_set_selected(p->gpu_api, 3);
-    g_assert_cmpuint(gtk_drop_down_get_selected(p->gpu_api), ==, 1);
-    g_assert_cmpuint(capture.gpu_writes, ==, 3);
+    /* Every offered API is available to the embedded renderer. */
+    GtkStringList *apis = GTK_STRING_LIST(gtk_drop_down_get_model(p->gpu_api));
+    g_assert_cmpuint(g_list_model_get_n_items(G_LIST_MODEL(apis)), ==, 3);
+    g_assert_cmpstr(gtk_string_list_get_string(apis, 0), ==, tr("Авто"));
+    g_assert_cmpstr(gtk_string_list_get_string(apis, 1), ==, "OpenGL");
+    g_assert_cmpstr(gtk_string_list_get_string(apis, 2), ==, "OpenGL ES");
     gtk_drop_down_set_selected(p->gpu_api, 2);
     g_assert_cmpuint(capture.gpu_writes, ==, 4);
     g_assert_cmpstr(capture.last_gpu_api, ==, "opengl");

@@ -79,7 +79,7 @@ static gboolean color(ArtHost *host, gboolean red)
     if (!pixbuf) return FALSE;
     int width = gdk_pixbuf_get_width(pixbuf), height = gdk_pixbuf_get_height(pixbuf);
     g_assert_cmpint(width, >, 0); g_assert_cmpint(height, >, 0);
-    g_assert_cmpint(width, <=, 1024); g_assert_cmpint(height, <=, 1024);
+    g_assert_cmpint(width, <=, 341); g_assert_cmpint(height, <=, 341);
     int channels = gdk_pixbuf_get_n_channels(pixbuf);
     const guchar *pixel = gdk_pixbuf_read_pixels(pixbuf) +
         gdk_pixbuf_get_rowstride(pixbuf) * (height / 2) + channels * (width / 2);
@@ -94,17 +94,17 @@ static void assert_quality(ArtHost *host, gboolean red)
     g_assert_nonnull(image);
     int width = gdk_pixbuf_get_width(image), height = gdk_pixbuf_get_height(image);
     /* Real source detail must survive; enlarging an old 160x90 thumbnail
-     * could satisfy dimensions alone but loses these four-pixel stripes. */
-    g_assert_cmpint(width, ==, red ? 768 : 1024);
-    g_assert_cmpint(height, ==, red ? 768 : 576);
+     * could satisfy dimensions alone but loses contrast in these stripes. */
+    g_assert_cmpint(width, ==, 341);
+    g_assert_cmpint(height, ==, red ? 341 : 191);
     g_assert_cmpint(width, >, 160); g_assert_cmpint(height, >, 90);
     double scale = (double)width / (red ? 768 : 1280);
     int y = (int)lround((100.5 * scale) - .5);
     int channels = gdk_pixbuf_get_n_channels(image);
     const guchar *pixels = gdk_pixbuf_read_pixels(image);
     int stride = gdk_pixbuf_get_rowstride(image);
-    for (int stripe = 2; stripe < 26; ++stripe) {
-        int x = (int)lround(((40 + stripe * 4 + 2.5) * scale) - .5);
+    for (int stripe = 2; stripe < 18; ++stripe) {
+        int x = (int)lround(((40 + stripe * 12 + 6.5) * scale) - .5);
         const guchar *sample = pixels + y * stride + x * channels;
         int brightness = (sample[0] + sample[1] + sample[2]) / 3;
         if (stripe % 2) g_assert_cmpint(brightness, <, 70);
@@ -166,7 +166,7 @@ static void stripe_patch(GdkPixbuf *image)
     int stride = gdk_pixbuf_get_rowstride(image), channels = gdk_pixbuf_get_n_channels(image);
     for (int y = 40; y < 168; ++y) {
         for (int x = 40; x < 296; ++x) {
-            guchar value = ((x - 40) / 4) % 2 ? 0 : 255;
+            guchar value = ((x - 40) / 12) % 2 ? 0 : 255;
             for (int channel = 0; channel < 3; ++channel)
                 pixels[y * stride + x * channels + channel] = value;
         }
@@ -313,6 +313,6 @@ int main(void)
     pump(&host, 200000);
     g_free(host.uri); g_free(host.icon_uri);
     remove_tree(directory);
-    puts("PASS MPRIS artwork: detailed 1024x576 video/768x768 cover PNGs, fallback, private cache, source replacement and safe teardown.");
+    puts("PASS MPRIS artwork: detailed 341x191 video/341x341 cover PNGs, fallback, private cache, source replacement and safe teardown.");
     return 0;
 }

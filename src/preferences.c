@@ -72,7 +72,7 @@ static const char *const hwdec_values[] = {
     "auto-safe", "no", "auto", "nvdec", "nvdec-copy", "auto-copy", "vaapi", "vdpau"
 };
 
-static const char *const gpu_api_values[] = {"auto", "opengl", "opengl-es", "vulkan"};
+static const char *const gpu_api_values[] = {"auto", "opengl", "opengl-es"};
 static const char *const autocreate_options[] = {"no", "filter", "same"};
 static const char *const directory_options[] = {"auto", "lazy", "recursive", "ignore"};
 static const char *const extension_options[] = {
@@ -947,45 +947,10 @@ static void changed_gpu_api(GObject *object, GParamSpec *property, gpointer data
     if (p->updating || !p->on_change ||
         selected >= G_N_ELEMENTS(gpu_api_values))
         return;
-    if (selected == 3) {
-        guint previous = 0;
-        for (guint i = 0; i < 3; ++i) {
-            if (g_strcmp0(p->values.gpu_api, gpu_api_values[i]) == 0)
-                previous = i;
-        }
-        p->updating = TRUE;
-        gtk_drop_down_set_selected(p->gpu_api, previous);
-        p->updating = FALSE;
-        return;
-    }
     const char *api = selected == 2 ? "opengl" : gpu_api_values[selected];
     const char *es = selected == 2 ? "yes" : selected == 1 ? "no" : "auto";
     p->on_change("gpu-api", MPV_FORMAT_STRING, &api, p->user_data);
     p->on_change("opengl-es", MPV_FORMAT_STRING, &es, p->user_data);
-}
-
-static void gpu_api_item_setup(GtkSignalListItemFactory *factory,
-                                GtkListItem *item, gpointer data)
-{
-    (void)factory;
-    (void)data;
-    GtkWidget *label = gtk_label_new(NULL);
-    gtk_label_set_xalign(GTK_LABEL(label), 0);
-    gtk_list_item_set_child(item, label);
-}
-
-static void gpu_api_item_bind(GtkSignalListItemFactory *factory,
-                               GtkListItem *item, gpointer data)
-{
-    (void)factory;
-    (void)data;
-    GtkWidget *label = gtk_list_item_get_child(item);
-    GtkStringObject *value = gtk_list_item_get_item(item);
-    gtk_label_set_text(GTK_LABEL(label), gtk_string_object_get_string(value));
-    gboolean allowed = gtk_list_item_get_position(item) != 3;
-    gtk_widget_set_sensitive(label, allowed);
-    gtk_list_item_set_selectable(item, allowed);
-    gtk_list_item_set_activatable(item, allowed);
 }
 
 static void audio_item_setup(GtkSignalListItemFactory *factory,
@@ -1173,7 +1138,7 @@ static void refresh_controls(Preferences *p, const char *section)
     }
     if (p->gpu_api && (!section || g_str_equal(section, "video"))) {
         guint api_selected = 0;
-        for (guint i = 0; i < 3; ++i) {
+        for (guint i = 0; i < G_N_ELEMENTS(gpu_api_values); ++i) {
             if (g_strcmp0(values->gpu_api, gpu_api_values[i]) == 0) {
                 api_selected = i;
                 break;
@@ -1421,15 +1386,10 @@ static void build_video(Preferences *p)
     gtk_widget_add_css_class(GTK_WIDGET(p->hwdec_status), "dim-label");
     gtk_box_append(GTK_BOX(hardware_labels), GTK_WIDGET(p->hwdec_status));
     g_signal_connect(p->hwdec, "notify::selected", G_CALLBACK(changed_hwdec), p);
-    const char *api_labels[] = {tr("Авто"), "OpenGL", "OpenGL ES", "Vulkan", NULL};
+    const char *api_labels[] = {tr("Авто"), "OpenGL", "OpenGL ES", NULL};
     p->gpu_api = GTK_DROP_DOWN(gtk_drop_down_new_from_strings(api_labels));
-    GtkListItemFactory *api_factory = gtk_signal_list_item_factory_new();
-    g_signal_connect(api_factory, "setup", G_CALLBACK(gpu_api_item_setup), p);
-    g_signal_connect(api_factory, "bind", G_CALLBACK(gpu_api_item_bind), p);
-    gtk_drop_down_set_list_factory(p->gpu_api, api_factory);
-    g_object_unref(api_factory);
     row(video, tr("Графический API (GPU API)"),
-        tr("Выбирает OpenGL или OpenGL ES для встроенного видео. Vulkan недоступен. Требуется перезапуск."),
+        tr("Выбирает OpenGL или OpenGL ES для встроенного видео. Требуется перезапуск."),
         GTK_WIDGET(p->gpu_api));
     g_signal_connect(p->gpu_api, "notify::selected", G_CALLBACK(changed_gpu_api), p);
     p->keepaspect = add_switch(p, video, "keepaspect", tr("Сохранять пропорции"),

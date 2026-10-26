@@ -33,7 +33,7 @@ from unfinished interface work. Item 16 is tentative.
 
 - [x] Expose playback state, metadata, and controls through MPRIS.
 - [x] Support desktop media controls, media keys routed by the desktop, and playerctl.
-- [x] Supply video thumbnails and audio cover art up to 1024 × 1024, with a player-icon fallback, to desktop media widgets.
+- [x] Supply video thumbnails and audio cover art up to 341 × 341, with a player-icon fallback, to desktop media widgets.
 
 ## 6. Prevent screen blanking during playback
 
