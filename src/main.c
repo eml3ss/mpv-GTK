@@ -36,7 +36,7 @@
 #include "seek_preview.h"
 
 #define APP_ID "io.github.emless.mpvgtk"
-#define APP_VERSION "0.20.1"
+#define APP_VERSION "0.20.2"
 #define APP_ICON_NAME APP_ID
 #define HWDEC_REFRESH_ID UINT64_C(10001)
 #define HWDEC_SET_ID UINT64_C(10002)
@@ -4219,7 +4219,10 @@ static void activate(GtkApplication *application, gpointer data)
         ".controls .trim-audio-menu > button:hover, .controls .trim-audio-menu > button:focus-visible {"
         "background: alpha(@window_fg_color,.08); }"
         ".controls .trim-audio-menu > button:active { background: alpha(@window_fg_color,.14); }"
-        "popover.trim-audio-popover { margin: 8px; }"
+        /* A horizontal margin on the native popover also shifts GTK's arrow.
+         * Keep that inset on its contents so the arrow stays on its anchor. */
+        "popover.trim-audio-popover { margin: 8px 0; }"
+        "popover.trim-audio-popover > contents { margin: 0 8px; }"
         ".controls .chapter-menu > button, .controls .chapter-menu > button:checked {"
         "background: transparent; box-shadow: none; color: @window_fg_color;"
         "border-color: transparent; padding: 4px; min-width: 24px; min-height: 24px; border-radius: 8px; }"
