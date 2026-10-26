@@ -100,7 +100,7 @@ implementation task. Queue restoration remains a separate task under item 2.
 - [x] Keep the standard toolbar buttons aligned in both trim layouts.
 - [x] Hide Trim Mode for audio files, including tracks with embedded cover art.
 - [x] Edit start/end times and set either boundary from the playback position.
-- [x] Navigate previous/next keyframes while playing or paused and preserve mode-specific shortcuts.
+- [x] Navigate previous/next keyframes while playing or paused, coalesce rapid clicks, and preserve mode-specific shortcuts.
 - [x] Export a separate copy or replace the original using the native lossless backend.
 - [x] Choose which source audio tracks to include in copy and replacement exports, including silent exports.
 - [x] Preserve export verification, backup/rollback, result opening, and playback state.

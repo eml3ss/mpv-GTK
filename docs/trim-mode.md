@@ -31,6 +31,8 @@ original script. Repeated edits continue smoothly from the current drawing.
 Repeated keyframe clicks continue from the last selected keyframe while
 playback advances within that interval. Seeking elsewhere or playing past
 the next keyframe makes navigation follow the current position again.
+Rapid clicks update the pending target while the current seek finishes,
+instead of adding separate decoder seeks for every click.
 
 Edit the start/end fields as HH:MM:SS.mmm, MM:SS.mmm, or decimal seconds.
 Enter commits a valid value and clears focus. Leaving the field also commits;
@@ -93,3 +95,6 @@ recovery path without a graphical display.
 
 `make test-trim-keyframes` checks repeated keyframe navigation during timed
 playback, rapid clicks, and seek/source resets without a graphical display.
+It includes large input bursts and verifies that the main context remains
+responsive. `make test-trim-keyframe-render` additionally checks overlapping
+seeks against a real libmpv software render context, without opening a window.

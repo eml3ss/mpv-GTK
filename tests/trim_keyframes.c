@@ -11,11 +11,16 @@
 #include <string.h>
 #include <sys/stat.h>
 
+#define STRESS_REPLY_ID UINT64_C(64000)
+
 typedef struct {
     mpv_handle *mpv;
     TrimBackend *backend;
     gboolean loaded;
     guint restarts;
+    guint heartbeats;
+    gint64 heartbeat_at, heartbeat_gap;
+    gboolean stress_reply;
 } KeyframeHost;
 
 static const mpv_node *field(const mpv_node *map, const char *name)
@@ -48,6 +53,11 @@ static void poll_host(KeyframeHost *host)
         host->loaded = FALSE;
     else if (event->event_id == MPV_EVENT_FILE_LOADED) host->loaded = TRUE;
     else if (event->event_id == MPV_EVENT_PLAYBACK_RESTART) ++host->restarts;
+    else if (event->event_id == MPV_EVENT_GET_PROPERTY_REPLY &&
+             event->reply_userdata == STRESS_REPLY_ID) {
+        g_assert_cmpint(event->error, >=, 0);
+        host->stress_reply = TRUE;
+    }
     if (event->event_id == MPV_EVENT_END_FILE) {
         const mpv_event_end_file *end = event->data;
         if (end && end->reason == MPV_END_FILE_REASON_ERROR)
@@ -103,17 +113,106 @@ static void manual_seek(KeyframeHost *host, double seconds)
 
 static void keyframe(KeyframeHost *host, const char *direction, double target, gboolean playing)
 {
+    if (g_getenv("MPV_GTK_KEYFRAME_TRACE"))
+        g_print("Keyframe %s to %.1f from %.3f, playing=%d.\n", direction, target, position(host), playing);
+    guint restarts = host->restarts;
     const char *arguments[] = {direction};
     trim_backend_action(host->backend, "keyframe", G_N_ELEMENTS(arguments), arguments);
+    /* A coalesced dispatch can start on the next main-context iteration.
+     * A matching pre-seek position is not evidence that it completed. */
+    gint64 deadline = g_get_monotonic_time() + 2000000;
+    while (host->restarts == restarts) {
+        if (g_get_monotonic_time() > deadline) g_error("Keyframe navigation did not restart playback.");
+        poll_host(host);
+    }
     await_position(host, target, playing, direction);
     /* The user clicks again after playback has moved off the exact I-frame.
      * This interval is the regression: the old backend repeatedly chose the
      * same preceding I-frame instead of continuing backward. */
     pump(host, playing ? 100000 : 30000);
     double actual = position(host);
+    if (g_getenv("MPV_GTK_KEYFRAME_TRACE")) g_print("Keyframe settled at %.3f.\n", actual);
     g_assert_cmpfloat(actual, >=, target - .03);
     g_assert_cmpfloat(actual, <, target + (playing ? .5 : .03));
     g_assert_cmpint(flag(host, "pause"), ==, !playing);
+}
+
+static gboolean heartbeat(gpointer data)
+{
+    KeyframeHost *host = data;
+    gint64 now = g_get_monotonic_time();
+    host->heartbeat_gap = MAX(host->heartbeat_gap, now - host->heartbeat_at);
+    host->heartbeat_at = now;
+    ++host->heartbeats;
+    return G_SOURCE_CONTINUE;
+}
+
+static void flood(KeyframeHost *host, const char *direction, guint count, gboolean compat)
+{
+    for (guint i = 0; i < count; ++i) {
+        const char *step = direction ? direction : i % 2 ? "next" : "previous";
+        if (compat) {
+            const char *args[] = {"script-message-to", "trim_mode", "keyframe", step, NULL};
+            g_assert_cmpint(mpv_command_async(host->mpv, 0, args), >=, 0);
+        } else {
+            const char *args[] = {step};
+            trim_backend_action(host->backend, "keyframe", G_N_ELEMENTS(args), args);
+        }
+    }
+}
+
+static void await_compatibility_marker(KeyframeHost *host)
+{
+    gint64 deadline = g_get_monotonic_time() + 2000000;
+    for (;;) {
+        mpv_node result = {0};
+        mpv_get_property(host->mpv, "user-data/trim-field-result", MPV_FORMAT_NODE, &result);
+        const mpv_node *serial = field(&result, "serial");
+        gboolean finished = serial && serial->format == MPV_FORMAT_STRING &&
+            g_strcmp0(serial->u.string, "stress-navigation") == 0;
+        mpv_free_node_contents(&result);
+        if (finished) return;
+        if (g_get_monotonic_time() > deadline)
+            g_error("The compatibility dispatcher did not drain its final keyframe batch.");
+        poll_host(host);
+    }
+}
+
+static void stress(KeyframeHost *host, const char *direction, guint count,
+                     gboolean compat, double target, gboolean playing)
+{
+    host->heartbeats = 0;
+    host->heartbeat_at = g_get_monotonic_time();
+    host->heartbeat_gap = 0;
+    guint timer = g_timeout_add(1, heartbeat, host);
+    gint64 submitted_at = g_get_monotonic_time();
+    flood(host, direction, count, compat);
+    double submitted_ms = (g_get_monotonic_time() - submitted_at) / 1000.0;
+    g_print("Submitted %u %s keyframe actions in %.1f ms.\n",
+        count, compat ? "compatibility-message" : "direct", submitted_ms);
+    if (compat) {
+        /* This harmless private-fixture edit is an ordered marker after the
+         * input flood, proving the compatibility queue drained completely. */
+        const char *args[] = {"script-message-to", "trim_mode", "set-time", "start",
+                              "1.234", "stress-navigation", NULL};
+        g_assert_cmpint(mpv_command_async(host->mpv, 0, args), >=, 0);
+    }
+    host->stress_reply = FALSE;
+    g_assert_cmpint(mpv_get_property_async(host->mpv, STRESS_REPLY_ID, "pause", MPV_FORMAT_FLAG), >=, 0);
+    gint64 deadline = g_get_monotonic_time() + 2000000;
+    while (!host->stress_reply) {
+        if (g_get_monotonic_time() > deadline) g_error("The player stopped responding after a keyframe flood.");
+        poll_host(host);
+    }
+    if (compat) await_compatibility_marker(host);
+    await_position(host, target, playing, "keyframe flood final target");
+    pump(host, 60000);
+    g_assert_cmpuint(host->heartbeats, >, 0);
+    g_assert_cmpint(host->heartbeat_gap, <, 250000);
+    g_assert_cmpint(flag(host, "pause"), ==, !playing);
+    g_source_remove(timer);
+    g_print("PASS %u %s keyframe actions: final %.1f, maximum main-context gap %.1f ms.\n",
+        count, compat ? "compatibility-message" : "direct", target, host->heartbeat_gap / 1000.0);
 }
 
 static void await_keyframes(KeyframeHost *host)
@@ -195,6 +294,7 @@ static void remove_tree(const char *path)
 
 int main(void)
 {
+    setvbuf(stdout, NULL, _IOLBF, 0);
     setlocale(LC_NUMERIC, "C");
     g_autofree char *ffmpeg = g_find_program_in_path("ffmpeg");
     g_autofree char *ffprobe = g_find_program_in_path("ffprobe");
@@ -253,14 +353,43 @@ int main(void)
     }
     keyframe(&host, "previous", 7, TRUE);
     paused(&host, TRUE);
+    manual_seek(&host, 7.2);
     trim_backend_set_enabled(host.backend, FALSE);
     trim_backend_set_enabled(host.backend, TRUE);
     await_keyframes(&host);
     keyframe(&host, "previous", 7, FALSE);
 
+    manual_seek(&host, 8.2);
+    stress(&host, "previous", 1000, FALSE, 0, FALSE);
+    stress(&host, "next", 1000, FALSE, 11, FALSE);
+    manual_seek(&host, 5.2);
+    paused(&host, FALSE);
+    stress(&host, NULL, 512, FALSE, 6, TRUE);
+    paused(&host, TRUE);
+    manual_seek(&host, 5.2);
+    paused(&host, FALSE);
+    /* An odd count also detects a bounded compatibility dispatcher that
+     * forgets to reschedule its final, incomplete batch. */
+    stress(&host, NULL, 511, TRUE, 5, TRUE);
+    paused(&host, TRUE);
+
+    /* Pending coalesced work must not undo a newer explicit seek when the
+     * mode changes, or run later against a newly loaded file. */
+    manual_seek(&host, 8.2);
+    flood(&host, "previous", 1000, FALSE);
+    trim_backend_set_enabled(host.backend, FALSE);
+    manual_seek(&host, 9.2);
+    pump(&host, 80000);
+    g_assert_cmpfloat(fabs(position(&host) - 9.2), <, .03);
+    trim_backend_set_enabled(host.backend, TRUE);
+    await_keyframes(&host);
+    keyframe(&host, "previous", 9, FALSE);
+
+    flood(&host, "previous", 1000, FALSE);
     load(&host, filename, "7.2");
     await_keyframes(&host);
     keyframe(&host, "previous", 7, FALSE);
+    flood(&host, "previous", 1000, FALSE);
     trim_backend_free(host.backend); host.backend = NULL;
     pump(&host, 30000);
     mpv_terminate_destroy(host.mpv);
