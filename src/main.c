@@ -39,7 +39,7 @@
 #include "audio_scrub.h"
 
 #define APP_ID "io.github.emless.mpvgtk"
-#define APP_VERSION "0.21.7"
+#define APP_VERSION "0.21.8"
 #define APP_ICON_NAME APP_ID
 #define HWDEC_REFRESH_ID UINT64_C(10001)
 #define HWDEC_SET_ID UINT64_C(10002)
@@ -233,6 +233,7 @@ typedef struct {
     guint initial_subtitle_pending_cycles;
     gboolean muted, ready, fullscreen, idle, pointer_bottom, pointer_present, controls_pressed;
     gboolean cursor_hidden;
+    gboolean time_remaining;
     gboolean loaded_once, test_paused, test_seek_sent, test_resumed, seek_ok;
     gboolean test_finished, render_failed;
     double preview, volume_value, test_seconds, max_render_ms, max_tick_gap_ms;
@@ -813,15 +814,37 @@ static void update_time(Player *p, double position)
         trim_mode_position(p->trim, position, p->timeline.paused);
         return;
     }
-    int second = (int)fmax(0, position);
+    gboolean known_duration = isfinite(p->timeline.duration) && p->timeline.duration > 0;
+    double shown = p->time_remaining
+                 ? (known_duration ? fmax(0, p->timeline.duration - position) : 0)
+                 : position;
+    int second = (int)fmax(0, shown);
     if (second == p->last_time_second)
         return;
     p->last_time_second = second;
-    g_autofree char *current = format_time(position);
-    g_autofree char *duration = p->timeline.duration > 0
+    g_autofree char *current = p->time_remaining && !known_duration
+                            ? g_strdup("--:--") : format_time(shown);
+    g_autofree char *duration = known_duration
                             ? format_time(p->timeline.duration) : g_strdup("--:--");
-    g_autofree char *text = g_strdup_printf("%s / %s", current, duration);
+    g_autofree char *text = g_strdup_printf("%s%s / %s",
+        p->time_remaining && known_duration ? "-" : "", current, duration);
     gtk_label_set_text(GTK_LABEL(p->time_label), text);
+}
+
+static void time_clicked(GtkGestureClick *gesture, int presses,
+                         double x, double y, gpointer data)
+{
+    (void)presses;
+    Player *p = data;
+    if (p->closing || p->quit_requested || trim_mode_active(p->trim) ||
+        !quick_control_contains(p->time_label, x, y))
+        return;
+    gtk_gesture_set_state(GTK_GESTURE(gesture), GTK_EVENT_SEQUENCE_CLAIMED);
+    p->time_remaining = !p->time_remaining;
+    p->last_time_second = -1;
+    double position = (p->dragging || p->seek_settling) ? p->preview
+                     : timeline_position(&p->timeline, g_get_monotonic_time());
+    update_time(p, position);
 }
 
 /* GTK's frame clock drives the progress bar, independently of mpv frames.
@@ -4143,6 +4166,11 @@ static void activate(GtkApplication *application, gpointer data)
     p->time_label = gtk_label_new("00:00 / --:--");
     gtk_widget_add_css_class(p->time_label, "timecode");
     gtk_widget_set_margin_start(p->time_label, 5);
+    translated_tooltip(p->time_label, "Переключить текущее и оставшееся время");
+    GtkGesture *time_click = gtk_gesture_click_new();
+    gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(time_click), GDK_BUTTON_PRIMARY);
+    g_signal_connect(time_click, "released", G_CALLBACK(time_clicked), p);
+    gtk_widget_add_controller(p->time_label, GTK_EVENT_CONTROLLER(time_click));
     gtk_box_append(GTK_BOX(audio_time), p->time_label);
     p->status_label = gtk_label_new("");
     gtk_widget_add_css_class(p->status_label, "dim-label");

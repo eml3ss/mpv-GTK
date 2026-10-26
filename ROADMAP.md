@@ -43,6 +43,7 @@ from unfinished interface work. Item 16 is tentative.
 ## 7. Timeline previews and precise seeking
 
 - [x] Seek immediately while dragging the timeline; display chapter markers.
+- [x] Click the playback clock to switch its left side between elapsed and remaining time.
 - [x] Show a frame thumbnail and timestamp on hover (local-video prototype).
 - [x] Reuse a persistent native decoder with low-resolution keyframe previews and idle-time exact refinement.
 - [x] Enable or disable previews in Interface settings, with immediate application and persistence.
