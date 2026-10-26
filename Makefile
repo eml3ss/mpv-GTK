@@ -55,12 +55,13 @@ STARTUP_TEST := build/test-startup
 GL_API_TEST := build/test-gl-api
 GL_STARTUP_TEST := build/test-gl-startup
 TRIM_NATIVE_TEST := build/test-trim-native
+TRIM_KEYFRAME_TEST := build/test-trim-keyframes
 SEEK_PREVIEW_TEST := build/test-seek-preview
 MPRIS_TEST := build/test-mpris
 MPRIS_ART_TEST := build/test-mpris-art
 DESKTOP := build/io.github.emless.mpvgtk.desktop
 
-.PHONY: all clean test test-trim test-trim-native test-seek-preview test-mpris test-mpris-art install uninstall FORCE
+.PHONY: all clean test test-trim test-trim-native test-trim-keyframes test-seek-preview test-mpris test-mpris-art install uninstall FORCE
 
 all: $(TARGET) $(CONFIG) $(INPUT_CONFIG) $(LOCALE_RESOURCE) $(TRIM_CONFIG) $(STOCK_LIB) $(STOCK_ENGINE) $(STOCK_DATA)
 
@@ -192,6 +193,14 @@ test-trim-native: $(TRIM_NATIVE_TEST)
 	if [ "$$status" -eq 77 ]; then printf '%s\n' 'Native Trim Mode check skipped (FFmpeg unavailable).'; \
 	elif [ "$$status" -ne 0 ]; then exit "$$status"; fi
 
+$(TRIM_KEYFRAME_TEST): tests/trim_keyframes.c src/trim_backend.c src/trim_backend.h src/trim_export.c src/trim_export.h src/keybindings.h $(STOCK_LIB) | build
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -o "$@" tests/trim_keyframes.c src/trim_backend.c src/trim_export.c $(shell $(PKG_CONFIG) --libs gio-2.0 mpv) -lm
+
+test-trim-keyframes: $(TRIM_KEYFRAME_TEST)
+	@./$(TRIM_KEYFRAME_TEST); status=$$?; \
+	if [ "$$status" -eq 77 ]; then printf '%s\n' 'Trim keyframe check skipped (FFmpeg tools unavailable).'; \
+	elif [ "$$status" -ne 0 ]; then exit "$$status"; fi
+
 $(SEEK_PREVIEW_TEST): tests/seek_preview.c src/seek_preview.c src/seek_preview.h src/preview_decoder.c src/preview_decoder.h src/i18n.c src/i18n.h $(STOCK_LIB) | build $(LOCALE_RESOURCE)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -o "$@" tests/seek_preview.c src/seek_preview.c src/preview_decoder.c src/i18n.c $(LDLIBS)
 
@@ -216,9 +225,9 @@ test-mpris-art: $(MPRIS_ART_TEST)
 	if [ "$$status" -eq 77 ]; then printf '%s\n' 'MPRIS artwork check skipped (FFmpeg unavailable).'; \
 	elif [ "$$status" -ne 0 ]; then exit "$$status"; fi
 
-test: test-mpris test-mpris-art
+test: test-mpris test-mpris-art test-trim-keyframes
 
-test-trim: all test-trim-native
+test-trim: all test-trim-native test-trim-keyframes
 	@MPV_GTK_BINARY="$(abspath $(TARGET))" python3 tests/trim.py; \
 	status=$$?; \
 	if [ "$$status" -eq 77 ]; then \
@@ -345,6 +354,7 @@ uninstall:
 clean:
 	rm -f "$(SEEK_PREVIEW_TEST)"
 	rm -f "$(TRIM_NATIVE_TEST)"
+	rm -f "$(TRIM_KEYFRAME_TEST)"
 	rm -f build/trim-licenses/LICENSE.LGPL build/trim-licenses/NOTICE.txt build/scripts/trim-mode.lua build/scripts/LICENSE.LGPL build/scripts/NOTICE.txt
 	rm -f "build/mpv-gtk-resources.c" $(COMMON_OBJECTS)
 	rm -f "$(WATCH_LATER_TEST)"

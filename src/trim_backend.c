@@ -52,7 +52,8 @@ struct TrimBackend {
     guint64 parse_request;
     GCancellable *parse_cancel;
     gint keyframe_target, seek_index;
-    gboolean seek_active, seek_started, seek_exact;
+    gboolean seek_active, seek_started, seek_exact, seek_acknowledged;
+    guint64 seek_request, seek_serial;
     double seek_point;
     gint64 seek_issued;
 };
@@ -431,6 +432,8 @@ static gboolean apply_boundary(TrimBackend *b, const char *boundary, double mill
 static void cancel_keyframe_seek(TrimBackend *b)
 {
     b->seek_active = b->seek_started = FALSE;
+    b->seek_acknowledged = FALSE;
+    b->seek_request = 0;
     b->keyframe_target = -1;
 }
 
@@ -453,6 +456,7 @@ static void stop_scan(TrimBackend *b)
 
 static void clear_keyframes(TrimBackend *b)
 {
+    cancel_keyframe_seek(b);
     /* Cache entries share immutable arrays with the active file. */
     g_array_unref(b->keyframes);
     b->keyframes = g_array_new(FALSE, FALSE, sizeof(double));
@@ -738,20 +742,44 @@ static void seek_keyframe(TrimBackend *b, gint index, gboolean exact)
         ? g_array_index(b->keyframes, double, index + 1) : (double)b->duration_ms / 1000;
     double point = exact ? target : target + MIN(.01, MAX(0, following - target) / 2);
     b->seek_active = TRUE; b->seek_started = FALSE; b->seek_exact = exact;
+    b->seek_acknowledged = FALSE;
+    b->seek_request = BACKEND_SEEK_ID + ++b->seek_serial;
     b->seek_index = index; b->seek_point = point; b->seek_issued = g_get_monotonic_time();
     char value[G_ASCII_DTOSTR_BUF_SIZE];
     g_ascii_dtostr(value, sizeof(value), point);
     const char *args[] = {"seek", value, exact ? "absolute+exact" : "absolute+keyframes", NULL};
-    if (mpv_command_async(b->mpv, BACKEND_SEEK_ID, args) < 0) cancel_keyframe_seek(b);
+    if (mpv_command_async(b->mpv, b->seek_request, args) < 0) cancel_keyframe_seek(b);
+}
+
+static double keyframe_seek_allowance(TrimBackend *b)
+{
+    double allowance = .002;
+    if (!property_flag(b, "pause", FALSE))
+        allowance += (g_get_monotonic_time() - b->seek_issued) / 1000000.0 * property_number(b, "speed", 1)
+            + 1 / MAX(1, property_number(b, "container-fps", 25));
+    return allowance;
 }
 
 static void jump_keyframe(TrimBackend *b, const char *direction)
 {
     if (!b->enabled || !available(b) || !b->keyframes->len) return;
-    double pos = b->keyframe_target >= 0 ? g_array_index(b->keyframes, double, b->keyframe_target)
-        : property_number(b, "time-pos", NAN);
+    gboolean have_target = b->keyframe_target >= 0 && (guint)b->keyframe_target < b->keyframes->len;
+    double pos = b->seek_active && have_target
+        ? g_array_index(b->keyframes, double, b->keyframe_target) : property_number(b, "time-pos", NAN);
     if (!isfinite(pos)) return;
     double epsilon = MIN(.002, .2 / MAX(1, property_number(b, "container-fps", 25)));
+    if (have_target) {
+        double anchor = g_array_index(b->keyframes, double, b->keyframe_target);
+        double following = (guint)(b->keyframe_target + 1) < b->keyframes->len
+            ? g_array_index(b->keyframes, double, b->keyframe_target + 1) : b->duration_ms / 1000.0;
+        /* Playing advances just after a keyframe seek. Keep that selected
+         * frame as the navigation cursor while it remains the current GOP,
+         * so repeated Previous clicks continue backwards instead of landing
+         * on the same keyframe again. Natural progress into a later GOP
+         * returns navigation to the live playback position. */
+        if (b->seek_active || (pos >= anchor - epsilon && pos < following - epsilon)) pos = anchor;
+        else b->keyframe_target = -1;
+    }
     gint low = 0, high = (gint)b->keyframes->len - 1;
     if (g_strcmp0(direction, "previous") == 0) {
         while (low <= high) {
@@ -783,14 +811,14 @@ static void playback_restarted(TrimBackend *b)
         return;
     }
     double pos = property_number(b, "time-pos", NAN);
-    double allowance = .002;
-    if (!property_flag(b, "pause", FALSE))
-        allowance += (g_get_monotonic_time() - b->seek_issued) / 1000000.0 * property_number(b, "speed", 1)
-            + 1 / MAX(1, property_number(b, "container-fps", 25));
+    double allowance = keyframe_seek_allowance(b);
     double target = g_array_index(b->keyframes, double, b->seek_index);
     if (isfinite(pos) && (pos < target - .002 || pos > target + allowance) && !b->seek_exact)
         seek_keyframe(b, b->seek_index, TRUE);
-    else cancel_keyframe_seek(b);
+    else if (isfinite(pos)) {
+        b->seek_active = b->seek_started = b->seek_acknowledged = FALSE;
+        b->seek_request = 0;
+    } else cancel_keyframe_seek(b);
 }
 
 void trim_backend_set_enabled(TrimBackend *b, gboolean enabled)
@@ -987,8 +1015,11 @@ gboolean trim_backend_handle_event(TrimBackend *b, const mpv_event *event)
     if (event->event_id == MPV_EVENT_COMMAND_REPLY) {
         if (b->scan_request && event->reply_userdata == b->scan_request) { finish_scan(b, event); return TRUE; }
         if (event->reply_userdata >= BACKEND_SCAN_BASE && event->reply_userdata < (UINT64_C(1) << 45)) return TRUE;
-        if (event->reply_userdata == BACKEND_SEEK_ID) {
-            if (event->error < 0) cancel_keyframe_seek(b);
+        if (event->reply_userdata >= BACKEND_SEEK_ID && event->reply_userdata < BACKEND_SCAN_BASE) {
+            if (event->reply_userdata == b->seek_request) {
+                if (event->error < 0) cancel_keyframe_seek(b);
+                else b->seek_acknowledged = TRUE;
+            }
             return TRUE;
         }
     } else if (event->event_id == MPV_EVENT_PROPERTY_CHANGE && event->reply_userdata == BACKEND_OBSERVE_BASE + 2) {
@@ -1006,12 +1037,17 @@ gboolean trim_backend_handle_event(TrimBackend *b, const mpv_event *event)
         refresh_duration(b);
         refresh_audio(b);
         scan_keyframes(b);
-    } else if (event->event_id == MPV_EVENT_SEEK && b->seek_active) {
-        double position = property_number(b, "time-pos", NAN);
-        double key = g_array_index(b->keyframes, double, b->seek_index);
-        if (b->seek_started || !isfinite(position) ||
-            (fabs(position - b->seek_point) > .002 && fabs(position - key) > .002)) cancel_keyframe_seek(b);
-        else b->seek_started = TRUE;
+    } else if (event->event_id == MPV_EVENT_SEEK) {
+        if (!b->seek_active) cancel_keyframe_seek(b);
+        else if (b->seek_acknowledged) {
+            double position = property_number(b, "time-pos", NAN);
+            double key = g_array_index(b->keyframes, double, b->seek_index);
+            double allowance = keyframe_seek_allowance(b);
+            if (b->seek_started || !isfinite(position) ||
+                position < MIN(b->seek_point, key) - .002 ||
+                position > MAX(b->seek_point, key) + allowance) cancel_keyframe_seek(b);
+            else b->seek_started = TRUE;
+        }
     } else if (event->event_id == MPV_EVENT_PLAYBACK_RESTART) playback_restarted(b);
     else if (event->event_id == MPV_EVENT_CLIENT_MESSAGE && !b->compat)
         return client_message(b, event->data);

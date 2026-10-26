@@ -118,10 +118,10 @@ static void glyph_draw(GtkDrawingArea *area, cairo_t *cr, int width, int height,
     cairo_set_line_cap(cr, CAIRO_LINE_CAP_ROUND);
     cairo_set_line_join(cr, CAIRO_LINE_JOIN_ROUND);
     if (glyph == SCISSORS) {
-        cairo_arc(cr, 6, 7, 3, 0, 2 * G_PI); cairo_stroke(cr);
-        cairo_arc(cr, 6, 17, 3, 0, 2 * G_PI); cairo_stroke(cr);
-        cairo_move_to(cr, 8.3, 9); cairo_line_to(cr, 21, 18);
-        cairo_move_to(cr, 8.3, 15); cairo_line_to(cr, 21, 6); cairo_stroke(cr);
+        cairo_arc(cr, 6, 8, 3, 0, 2 * G_PI); cairo_stroke(cr);
+        cairo_arc(cr, 6, 16, 3, 0, 2 * G_PI); cairo_stroke(cr);
+        cairo_move_to(cr, 8.3, 10); cairo_line_to(cr, 21, 15.5);
+        cairo_move_to(cr, 8.3, 14); cairo_line_to(cr, 21, 8.5); cairo_stroke(cr);
     } else if (glyph == KEY_PREVIOUS || glyph == KEY_NEXT) {
         if (glyph == KEY_NEXT) { cairo_translate(cr, 24, 0); cairo_scale(cr, -1, 1); }
         cairo_arc(cr, 15, 12, 4, 0, 2 * G_PI); cairo_stroke(cr);

@@ -28,6 +28,10 @@ original script. Repeated edits continue smoothly from the current drawing.
 | Export a copy, keeping the original | Copy export button / Ctrl+E |
 | Export and replace the original | Replace export button / Ctrl+Shift+E |
 
+Repeated keyframe clicks continue from the last selected keyframe while
+playback advances within that interval. Seeking elsewhere or playing past
+the next keyframe makes navigation follow the current position again.
+
 Edit the start/end fields as HH:MM:SS.mmm, MM:SS.mmm, or decimal seconds.
 Enter commits a valid value and clears focus. Leaving the field also commits;
 invalid values are discarded on blur. Escape cancels the edit. The start must
@@ -86,3 +90,6 @@ and cancellation during export. Its native check deliberately fails opening a
 replacement and verifies that rollback restores the original bytes, permissions,
 playback position, and pause state. Run `make test-trim-native` to exercise that
 recovery path without a graphical display.
+
+`make test-trim-keyframes` checks repeated keyframe navigation during timed
+playback, rapid clicks, and seek/source resets without a graphical display.
