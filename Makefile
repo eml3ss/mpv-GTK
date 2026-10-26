@@ -1,4 +1,7 @@
-CC ?= cc
+ifeq ($(origin CC),default)
+CC := clang
+endif
+CC ?= clang
 PKG_CONFIG ?= pkg-config
 GLIB_COMPILE_RESOURCES ?= glib-compile-resources
 PREFIX ?= $(HOME)/.local

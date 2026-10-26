@@ -41,7 +41,7 @@
 #include "queue_view.h"
 
 #define APP_ID "io.github.emless.mpvgtk"
-#define APP_VERSION "0.22.3"
+#define APP_VERSION "0.22.4"
 #define APP_ICON_NAME APP_ID
 #define HWDEC_REFRESH_ID UINT64_C(10001)
 #define HWDEC_SET_ID UINT64_C(10002)
@@ -4409,6 +4409,13 @@ static void activate(GtkApplication *application, gpointer data)
         "background: alpha(@window_fg_color,.08); }"
         ".queue-editor .queue-selection-bar button.queue-action {"
         "min-height: 20px; padding: 2px 6px; }"
+        ".queue-editor .queue-row-body { transition: transform 160ms cubic-bezier(.2,.9,.25,1.12), opacity 100ms ease; }"
+        ".queue-editor .queue-row-body.queue-shift-up { transform: translate(0,-10px); }"
+        ".queue-editor .queue-row-body.queue-shift-down { transform: translate(0,10px); }"
+        ".queue-editor .queue-row-body.queue-drag-source { opacity: .35; }"
+        ".queue-editor.queue-dragging .queue-entry:selected { background: transparent; }"
+        ".queue-editor.queue-dragging .queue-entry:selected > .queue-row-body {"
+        "background: alpha(@accent_bg_color,.30); border-radius: 7px; }"
         "popover.chapters-popover > contents { padding: 4px; }"
         "list.chapters-list { padding: 0; }"
         "list.chapters-list > row { min-height: 0; padding: 2px 6px; margin: 1px 0; border-radius: 5px; }"

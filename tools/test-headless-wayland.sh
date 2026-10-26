@@ -11,7 +11,7 @@ mkdir -p build/headless-wayland-protocols
 wayland-scanner server-header \
     /usr/share/wayland-protocols/stable/xdg-shell/xdg-shell.xml \
     build/headless-wayland-protocols/xdg-shell-protocol.h
-"${CC:-cc}" -O2 -g -std=c11 -Wall -Wextra -Wpedantic \
+"${CC:-clang}" -O2 -g -std=c11 -Wall -Wextra -Wpedantic \
     -Ibuild/headless-wayland-protocols tests/headless_wayland.c \
     -o build/test-headless-wayland "${test_flags[@]}"
 test_directory=$(mktemp -d "$project_dir/build/.headless-wayland.XXXXXXXX")

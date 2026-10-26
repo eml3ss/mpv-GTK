@@ -4,12 +4,14 @@ Open the queue with its toolbar button or Ctrl+P. Click an entry or press
 Enter to play it. An ordinary click replaces the selection, which then follows
 playback changes. Ctrl-click adds individual entries to the selection,
 Shift-click selects a range, and Ctrl+A selects the visible entries. This
-explicit selection stays in place while playback changes. Delete or the remove button removes the selected entries from the
-queue. Files on disk are unchanged.
+explicit selection stays in place while playback changes. Delete or the remove
+button removes the selected entries from the queue. Files on disk are unchanged.
 
-Drag an entry by its handle to move it before or after another entry. The
-insertion line shows its destination. Search matches titles and paths without
-changing the underlying queue. Dragging or removing filtered results still
+Drag an entry by its handle to move it before or after another entry. The grab
+area extends around the small grip, and neighboring entries animate aside to
+open the insertion slot. The insertion line shows its destination. Search
+matches titles and paths without changing the underlying queue. Dragging or
+removing filtered results still
 targets the original entries, including when the same file occurs more than
 once.
 

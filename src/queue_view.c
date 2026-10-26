@@ -31,7 +31,7 @@ typedef struct {
     QueueView *view;
     int64_t id;
     char *title, *filename, *search;
-    GtkWidget *row, *index, *label, *remove, *handle;
+    GtkWidget *row, *body, *index, *label, *remove, *handle;
 } QueueRow;
 
 struct QueueView {
@@ -41,11 +41,17 @@ struct QueueView {
     GObject *drag_token;
     GPtrArray *rows;
     char *query;
-    guint restore_source, click_reset_source;
+    guint restore_source, click_reset_source, drag_leave_source;
+    GtkDragSource *drag_source;
+    int64_t drag_id, drag_before;
     int64_t current_id;
     double scroll_position;
     gboolean updating, rebuilding, selection_click, manual_selection;
+    gboolean drag_active, drag_committed;
 };
+
+static void clear_drag_preview(QueueView *view);
+static void cancel_view_drag(QueueView *view);
 
 static char *search_text(const char *text)
 {
@@ -116,7 +122,7 @@ static void update_actions(QueueView *view)
 {
     const GPtrArray *entries = queue_model_entries(view->model);
     guint count = entries ? entries->len : 0;
-    gboolean ready = !queue_model_busy(view->model);
+    gboolean ready = !queue_model_busy(view->model) && !view->drag_active && !view->drag_committed;
     g_autoptr(GArray) ids = selected_ids(view);
     g_autofree char *selected = g_strdup_printf(tr("Выбрано: %u"), ids->len);
     gtk_label_set_text(GTK_LABEL(view->selected), selected);
@@ -125,12 +131,13 @@ static void update_actions(QueueView *view)
     gtk_widget_set_sensitive(view->sort, ready && count > 1);
     gtk_widget_set_sensitive(view->shuffle, ready && count > 1);
     gtk_widget_set_sensitive(view->repeat, ready);
-    gtk_widget_set_visible(view->spinner, !ready);
-    gtk_spinner_set_spinning(GTK_SPINNER(view->spinner), !ready);
+    gtk_widget_set_visible(view->spinner, queue_model_busy(view->model));
+    gtk_spinner_set_spinning(GTK_SPINNER(view->spinner), queue_model_busy(view->model));
     for (guint i = 0; i < view->rows->len; ++i) {
         QueueRow *row = g_ptr_array_index(view->rows, i);
         gtk_widget_set_sensitive(row->remove, ready);
-        gtk_widget_set_sensitive(row->handle, ready && count > 1);
+        gtk_widget_set_sensitive(row->handle, (view->drag_active && row->id == view->drag_id) ||
+                                 (ready && count > 1));
     }
 }
 
@@ -239,9 +246,16 @@ static gboolean reset_click_idle(gpointer data)
     return G_SOURCE_REMOVE;
 }
 
+static void list_mapped(GtkWidget *widget, gpointer data)
+{
+    (void)widget;
+    queue_view_refresh(data);
+}
+
 static void list_unmapped(GtkWidget *widget, gpointer data)
 {
     (void)widget;
+    cancel_view_drag(data);
     reset_click_policy(data);
 }
 
@@ -369,11 +383,105 @@ static GtkWidget *action_icon(gboolean shuffle)
     return icon;
 }
 
+static void cancel_drag_leave(QueueView *view)
+{
+    if (view->drag_leave_source) g_source_remove(view->drag_leave_source);
+    view->drag_leave_source = 0;
+}
+
+static void clear_drag_preview(QueueView *view)
+{
+    cancel_drag_leave(view);
+    for (guint i = 0; i < view->rows->len; ++i) {
+        QueueRow *row = view->rows->pdata[i];
+        gtk_widget_remove_css_class(row->body, "queue-shift-up");
+        gtk_widget_remove_css_class(row->body, "queue-shift-down");
+        gtk_widget_remove_css_class(row->body, "queue-drag-source");
+        gtk_widget_remove_css_class(row->row, "drop-before");
+        gtk_widget_remove_css_class(row->row, "drop-after");
+    }
+    gtk_widget_remove_css_class(view->root, "queue-dragging");
+}
+
+static void cancel_view_drag(QueueView *view)
+{
+    if (view->drag_source) {
+        g_signal_handlers_disconnect_by_data(view->drag_source, view);
+        gtk_drag_source_drag_cancel(view->drag_source);
+        g_clear_object(&view->drag_source);
+    }
+    view->drag_active = view->drag_committed = FALSE;
+    clear_drag_preview(view);
+}
+
+static gboolean leave_drag_idle(gpointer data)
+{
+    QueueView *view = data;
+    view->drag_leave_source = 0;
+    if (!view->drag_committed) clear_drag_preview(view);
+    return G_SOURCE_REMOVE;
+}
+
+static void schedule_drag_leave(QueueView *view)
+{
+    if (!view->drag_leave_source && !view->drag_committed)
+        view->drag_leave_source = g_idle_add_full(G_PRIORITY_HIGH_IDLE, leave_drag_idle, view, NULL);
+}
+
+static void drag_begin(GtkDragSource *source, GdkDrag *drag, gpointer data)
+{
+    (void)drag;
+    QueueRow *row = data;
+    QueueView *view = row->view;
+    g_autoptr(GdkPaintable) paintable = gtk_widget_paintable_new(row->row);
+    g_autoptr(GdkPaintable) image = gdk_paintable_get_current_image(paintable);
+    gtk_drag_source_set_icon(source, image, 16, gtk_widget_get_height(row->row) / 2);
+    view->drag_source = g_object_ref(source);
+    view->drag_id = row->id;
+    view->drag_before = row->id;
+    view->drag_active = TRUE;
+    view->drag_committed = FALSE;
+    gtk_widget_add_css_class(view->root, "queue-dragging");
+    gtk_widget_add_css_class(row->body, "queue-drag-source");
+    update_actions(view);
+}
+
+static void drag_end(GtkDragSource *source, GdkDrag *drag, gboolean delete_data, gpointer data)
+{
+    (void)source; (void)drag; (void)delete_data;
+    QueueView *view = data;
+    view->drag_active = FALSE;
+    g_clear_object(&view->drag_source);
+    if (!view->drag_committed || !queue_model_busy(view->model)) {
+        view->drag_committed = FALSE;
+        clear_drag_preview(view);
+    }
+    queue_view_refresh(view);
+}
+
+static gboolean drag_cancel(GtkDragSource *source, GdkDrag *drag,
+                            GdkDragCancelReason reason, gpointer data)
+{
+    (void)source; (void)drag; (void)reason;
+    QueueView *view = data;
+    view->drag_active = view->drag_committed = FALSE;
+    clear_drag_preview(view);
+    return FALSE;
+}
+
+static void handle_released(GtkGestureClick *gesture, int count,
+                             double x, double y, gpointer data)
+{
+    (void)count; (void)x; (void)y; (void)data;
+    gtk_gesture_set_state(GTK_GESTURE(gesture), GTK_EVENT_SEQUENCE_CLAIMED);
+}
+
 static GdkContentProvider *drag_prepare(GtkDragSource *source, double x, double y, gpointer data)
 {
     (void)source; (void)x; (void)y;
     QueueRow *row = data;
-    if (queue_model_busy(row->view->model)) return NULL;
+    if (queue_model_busy(row->view->model) || row->view->drag_active ||
+        row->view->drag_committed) return NULL;
     QueueDrag *drag = g_object_new(queue_drag_get_type(), NULL);
     drag->token = g_object_ref(row->view->drag_token);
     drag->id = row->id;
@@ -393,54 +501,103 @@ static gboolean accepts_drag(QueueView *view, const GValue *value)
     return drag && drag->token == view->drag_token;
 }
 
-static void clear_drop_style(QueueRow *row)
+/* All hover decisions use unchanged GtkListBoxRow allocations. Only each
+ * row's inner content moves, so crossing an animated item cannot oscillate
+ * the insertion slot or change the native destination index. */
+static int64_t insertion_at(QueueView *view, double y, QueueRow **marked, gboolean *after)
 {
-    gtk_widget_remove_css_class(row->row, "drop-before");
-    gtk_widget_remove_css_class(row->row, "drop-after");
+    *marked = NULL;
+    *after = FALSE;
+    GtkListBoxRow *widget = gtk_list_box_get_row_at_y(GTK_LIST_BOX(view->list), (int)y);
+    if (!widget) {
+        for (guint i = 0; i < view->rows->len; ++i) {
+            QueueRow *candidate = view->rows->pdata[i];
+            graphene_rect_t bounds;
+            if (row_matches(view, candidate) &&
+                gtk_widget_compute_bounds(candidate->row, view->list, &bounds) &&
+                bounds.origin.y > y) {
+                widget = GTK_LIST_BOX_ROW(candidate->row);
+                break;
+            }
+        }
+    }
+    if (!widget) return -1;
+    QueueRow *row = g_object_get_data(G_OBJECT(widget), "mpv-queue-row");
+    if (!row) return -1;
+    graphene_point_t from = GRAPHENE_POINT_INIT(0, y), to;
+    if (!gtk_widget_compute_point(view->list, GTK_WIDGET(widget), &from, &to)) return -1;
+    *marked = row;
+    *after = to.y >= gtk_widget_get_height(GTK_WIDGET(widget)) / 2.0;
+    if (!*after) return row->id;
+    const GPtrArray *entries = queue_model_entries(view->model);
+    for (guint i = 0; entries && i < entries->len; ++i) {
+        const QueueEntry *entry = entries->pdata[i];
+        if (entry->id == row->id)
+            return i + 1 < entries->len ? ((QueueEntry *)entries->pdata[i + 1])->id : -1;
+    }
+    return -2; /* The hovered entry was removed by an external queue edit. */
+}
+
+static void preview_insertion(QueueView *view, int64_t before, QueueRow *marked, gboolean after)
+{
+    cancel_drag_leave(view);
+    if (view->drag_before == before && gtk_widget_has_css_class(view->root, "queue-dragging")) return;
+    gtk_widget_add_css_class(view->root, "queue-dragging");
+    gboolean below = FALSE;
+    for (guint i = 0; i < view->rows->len; ++i) {
+        QueueRow *row = view->rows->pdata[i];
+        if (row->id == before) below = TRUE;
+        gtk_widget_remove_css_class(row->row, "drop-before");
+        gtk_widget_remove_css_class(row->row, "drop-after");
+        gboolean shifted = row->id != view->drag_id && row_matches(view, row);
+        if (shifted && !below) gtk_widget_add_css_class(row->body, "queue-shift-up");
+        else gtk_widget_remove_css_class(row->body, "queue-shift-up");
+        if (shifted && below) gtk_widget_add_css_class(row->body, "queue-shift-down");
+        else gtk_widget_remove_css_class(row->body, "queue-shift-down");
+        if (row->id == view->drag_id) gtk_widget_add_css_class(row->body, "queue-drag-source");
+    }
+    if (marked) gtk_widget_add_css_class(marked->row, after ? "drop-after" : "drop-before");
+    view->drag_before = before;
+}
+
+static GdkDragAction preview_at(GtkDropTarget *target, double y, QueueView *view)
+{
+    if (!accepts_drag(view, gtk_drop_target_get_value(target))) return 0;
+    QueueRow *marked;
+    gboolean after;
+    int64_t before = insertion_at(view, y, &marked, &after);
+    if (before < -1) return 0;
+    if (view->drag_active) preview_insertion(view, before, marked, after);
+    return GDK_ACTION_MOVE;
 }
 
 static GdkDragAction drop_motion(GtkDropTarget *target, double x, double y, gpointer data)
 {
-    (void)x;
     QueueRow *row = data;
-    clear_drop_style(row);
-    if (!accepts_drag(row->view, gtk_drop_target_get_value(target))) return 0;
-    gtk_widget_add_css_class(row->row,
-        y < gtk_widget_get_height(row->row) / 2.0 ? "drop-before" : "drop-after");
-    return GDK_ACTION_MOVE;
+    graphene_point_t from = GRAPHENE_POINT_INIT(x, y), to;
+    if (!gtk_widget_compute_point(row->row, row->view->list, &from, &to)) return 0;
+    return preview_at(target, to.y, row->view);
+}
+
+static GdkDragAction list_drop_motion(GtkDropTarget *target, double x, double y, gpointer data)
+{
+    (void)x;
+    return preview_at(target, y, data);
 }
 
 static void drop_leave(GtkDropTarget *target, gpointer data)
 {
     (void)target;
-    clear_drop_style(data);
+    QueueRow *row = data;
+    gtk_widget_remove_css_class(row->row, "drop-before");
+    gtk_widget_remove_css_class(row->row, "drop-after");
+    schedule_drag_leave(row->view);
 }
 
-static gboolean drop_on_row(GtkDropTarget *target, const GValue *value,
-                             double x, double y, gpointer data)
+static void list_drop_leave(GtkDropTarget *target, gpointer data)
 {
-    (void)target; (void)x;
-    QueueRow *row = data;
-    QueueView *view = row->view;
-    clear_drop_style(row);
-    if (!accepts_drag(view, value)) return FALSE;
-    QueueDrag *drag = g_value_get_object(value);
-    if (drag->id == row->id) return TRUE;
-    int64_t before = row->id;
-    if (y >= gtk_widget_get_height(row->row) / 2.0) {
-        const GPtrArray *entries = queue_model_entries(view->model);
-        before = -1;
-        for (guint i = 0; entries && i < entries->len; ++i) {
-            const QueueEntry *entry = g_ptr_array_index(entries, i);
-            if (entry->id == row->id) {
-                if (i + 1 < entries->len)
-                    before = ((const QueueEntry *)g_ptr_array_index(entries, i + 1))->id;
-                break;
-            }
-        }
-    }
-    if (before != drag->id) queue_model_move(view->model, drag->id, before);
-    return TRUE;
+    (void)target;
+    schedule_drag_leave(data);
 }
 
 static gboolean drop_at_end(GtkDropTarget *target, const GValue *value,
@@ -449,18 +606,27 @@ static gboolean drop_at_end(GtkDropTarget *target, const GValue *value,
     (void)target; (void)x;
     QueueView *view = data;
     if (!accepts_drag(view, value)) return FALSE;
-    GtkListBoxRow *widget = gtk_list_box_get_row_at_y(GTK_LIST_BOX(view->list), (int)y);
-    if (widget) {
-        QueueRow *row = g_object_get_data(G_OBJECT(widget), "mpv-queue-row");
-        if (row) {
-            graphene_point_t from = GRAPHENE_POINT_INIT(0, y), to;
-            if (gtk_widget_compute_point(view->list, GTK_WIDGET(widget), &from, &to))
-                return drop_on_row(target, value, 0, to.y, row);
-        }
-    }
     QueueDrag *drag = g_value_get_object(value);
-    queue_model_move(view->model, drag->id, -1);
+    QueueRow *marked;
+    gboolean after;
+    int64_t before = insertion_at(view, y, &marked, &after);
+    if (before < -1) return FALSE;
+    if (before == drag->id) return TRUE;
+    if (view->drag_active) {
+        preview_insertion(view, before, marked, after);
+        view->drag_committed = TRUE;
+    }
+    queue_model_move(view->model, drag->id, before);
     return TRUE;
+}
+
+static gboolean drop_on_row(GtkDropTarget *target, const GValue *value,
+                             double x, double y, gpointer data)
+{
+    QueueRow *row = data;
+    graphene_point_t from = GRAPHENE_POINT_INIT(x, y), to;
+    if (!gtk_widget_compute_point(row->row, row->view->list, &from, &to)) return FALSE;
+    return drop_at_end(target, value, to.x, to.y, row->view);
 }
 
 static QueueRow *new_row(QueueView *view, const QueueEntry *entry)
@@ -476,14 +642,25 @@ static QueueRow *new_row(QueueView *view, const QueueEntry *entry)
     gtk_widget_add_css_class(row->row, "queue-entry");
     g_object_set_data_full(G_OBJECT(row->row), "mpv-queue-row", row, row_free);
     GtkWidget *box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
+    row->body = box;
+    gtk_widget_add_css_class(box, "queue-row-body");
+    gtk_widget_set_overflow(row->row, GTK_OVERFLOW_VISIBLE);
     gtk_widget_set_margin_start(box, 6);
     gtk_widget_set_margin_end(box, 6);
     gtk_widget_set_margin_top(box, 5);
     gtk_widget_set_margin_bottom(box, 5);
-    row->handle = gtk_drawing_area_new();
-    gtk_drawing_area_set_content_width(GTK_DRAWING_AREA(row->handle), 12);
-    gtk_drawing_area_set_content_height(GTK_DRAWING_AREA(row->handle), 22);
-    gtk_drawing_area_set_draw_func(GTK_DRAWING_AREA(row->handle), handle_draw, NULL, NULL);
+    row->handle = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+    gtk_widget_set_size_request(row->handle, 28, -1);
+    gtk_widget_set_valign(row->handle, GTK_ALIGN_FILL);
+    GtkWidget *grip = gtk_drawing_area_new();
+    gtk_drawing_area_set_content_width(GTK_DRAWING_AREA(grip), 12);
+    gtk_drawing_area_set_content_height(GTK_DRAWING_AREA(grip), 22);
+    gtk_drawing_area_set_draw_func(GTK_DRAWING_AREA(grip), handle_draw, NULL, NULL);
+    gtk_widget_set_halign(grip, GTK_ALIGN_CENTER);
+    gtk_widget_set_valign(grip, GTK_ALIGN_CENTER);
+    gtk_widget_set_hexpand(grip, TRUE);
+    gtk_widget_set_can_target(grip, FALSE);
+    gtk_box_append(GTK_BOX(row->handle), grip);
     gtk_widget_add_css_class(row->handle, "queue-drag-handle");
     gtk_widget_add_css_class(row->handle, "dim-label");
     tooltip(row->handle, "Перетащить запись");
@@ -491,7 +668,15 @@ static QueueRow *new_row(QueueView *view, const QueueEntry *entry)
     GtkDragSource *source = gtk_drag_source_new();
     gtk_drag_source_set_actions(source, GDK_ACTION_MOVE);
     g_signal_connect(source, "prepare", G_CALLBACK(drag_prepare), row);
+    g_signal_connect(source, "drag-begin", G_CALLBACK(drag_begin), row);
+    g_signal_connect(source, "drag-end", G_CALLBACK(drag_end), view);
+    g_signal_connect(source, "drag-cancel", G_CALLBACK(drag_cancel), view);
     gtk_widget_add_controller(row->handle, GTK_EVENT_CONTROLLER(source));
+    GtkGesture *handle_click = gtk_gesture_click_new();
+    gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(handle_click), GDK_BUTTON_PRIMARY);
+    gtk_event_controller_set_propagation_phase(GTK_EVENT_CONTROLLER(handle_click), GTK_PHASE_CAPTURE);
+    g_signal_connect(handle_click, "released", G_CALLBACK(handle_released), NULL);
+    gtk_widget_add_controller(row->handle, GTK_EVENT_CONTROLLER(handle_click));
     gtk_box_append(GTK_BOX(box), row->handle);
     row->index = gtk_label_new(NULL);
     gtk_widget_add_css_class(row->index, "queue-index");
@@ -554,11 +739,15 @@ void queue_view_refresh(QueueView *view)
     }
     /* A sort can produce many intermediate native snapshots. The stable-ID
      * selection stays on the old rows until the serialized edit completes. */
-    if (rebuild && queue_model_busy(view->model)) {
+    if (rebuild && (queue_model_busy(view->model) || view->drag_active)) {
         g_autofree char *count_text = g_strdup_printf(tr("Очередь · %d"), (int)count);
         gtk_label_set_text(GTK_LABEL(view->count), count_text);
         update_actions(view);
         return;
+    }
+    if (view->drag_committed && !view->drag_active && !queue_model_busy(view->model)) {
+        view->drag_committed = FALSE;
+        clear_drag_preview(view);
     }
     if (rebuild) {
         g_autoptr(GArray) selected = selected_ids(view);
@@ -745,6 +934,7 @@ QueueView *queue_view_new(QueueModel *model)
     g_signal_connect(clicks, "event", G_CALLBACK(list_click_event), view);
     gtk_widget_add_controller(view->list, clicks);
     g_signal_connect(view->list, "unmap", G_CALLBACK(list_unmapped), view);
+    g_signal_connect(view->list, "map", G_CALLBACK(list_mapped), view);
     gtk_list_box_set_filter_func(GTK_LIST_BOX(view->list), filter_row, view, NULL);
     tooltip(view->list, "Один щелчок — воспроизвести\nCtrl/Shift — выбрать несколько\nDelete — удалить выбранное");
     g_signal_connect(view->list, "row-activated", G_CALLBACK(row_activated), view);
@@ -756,6 +946,9 @@ QueueView *queue_view_new(QueueModel *model)
     gtk_list_box_set_placeholder(GTK_LIST_BOX(view->list), view->placeholder);
     GtkDropTarget *end = gtk_drop_target_new(queue_drag_get_type(), GDK_ACTION_MOVE);
     gtk_drop_target_set_preload(end, TRUE);
+    g_signal_connect(end, "enter", G_CALLBACK(list_drop_motion), view);
+    g_signal_connect(end, "motion", G_CALLBACK(list_drop_motion), view);
+    g_signal_connect(end, "leave", G_CALLBACK(list_drop_leave), view);
     g_signal_connect(end, "drop", G_CALLBACK(drop_at_end), view);
     gtk_widget_add_controller(view->list, GTK_EVENT_CONTROLLER(end));
     gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(view->scroller), view->list);
@@ -810,6 +1003,7 @@ void queue_view_free(QueueView *view)
     if (!view) return;
     if (view->restore_source) g_source_remove(view->restore_source);
     cancel_click_reset(view);
+    cancel_view_drag(view);
     view->rebuilding = TRUE;
     /* The host removes the root from its revealer before dropping this ref. */
     g_object_unref(view->root);

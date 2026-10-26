@@ -18,8 +18,8 @@ See the [roadmap](ROADMAP.md) for planned features and implementation progress.
 
 ## Build and run
 
-Requires Linux with Wayland, GTK 4.22+, mpv/libmpv, libepoxy, a C11 compiler,
-Make, pkg-config, Python 3, and `glib-compile-resources`.
+Requires Linux with Wayland, GTK 4.22+, mpv/libmpv, libepoxy, Clang (or another
+C11 compiler), Make, pkg-config, Python 3, and `glib-compile-resources`.
 Trim Mode additionally requires FFmpeg (`ffmpeg` and `ffprobe`).
 
 ```sh
@@ -31,6 +31,7 @@ make -j
 
 The build uses your installed mpv and libmpv. Video is embedded through
 libmpv's OpenGL/OpenGL ES API. See [backend details](docs/mpv-backend.md).
+Clang is the default compiler; use `make CC=cc` to select another compiler.
 
 Install for the current user:
 
