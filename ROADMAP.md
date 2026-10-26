@@ -107,6 +107,7 @@ implementation task. Queue restoration remains a separate task under item 2.
 - [x] Navigate previous/next keyframes while playing or paused, coalesce rapid clicks, and preserve mode-specific shortcuts.
 - [x] Export a separate copy or replace the original using the native lossless backend.
 - [x] Choose which source audio tracks to include in copy and replacement exports, including silent exports.
+- [x] Preserve MP4 audio track names in copy and replacement exports, including selected-track exports.
 - [x] Preserve export verification, backup/rollback, result opening, and playback state.
 - [x] Show native GTK export progress; initialize the backend and trim controls on demand.
 - [x] Implement all Trim Mode logic in C, including keyframes, validation, export, and recovery.

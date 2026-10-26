@@ -15,6 +15,8 @@ LICENSE for more details.
 
 Third-party components retain their original copyright and license terms:
 
+- src/mp4_titles.c and src/mp4_titles.h are adapted from mp4-audio-names-fix
+  under GPL-2.0-or-later and distributed as part of this GPL-3.0-or-later program.
 - The Papirus SVGs in data/icons/scalable/ are licensed under GPL version 3.
   See data/icons/NOTICE.txt, data/icons/LICENSE.GPL3, and
   data/icons/SOURCES.tsv for attribution, the license, and the source inventory.

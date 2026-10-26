@@ -58,6 +58,10 @@ FFmpeg and ffprobe are required. Exports support local video files and use
 FFmpeg stream copy, subject to the original codec/keyframe cutting behavior.
 They keep the original extension, metadata, chapter mapping, and source streams
 except audio tracks explicitly excluded from export.
+MP4 audio track names remain readable by mpv after export, including when
+only a subset of the original tracks is kept. The completed temporary file's
+audio title atoms are normalized before verification; source files are not
+patched during copy exports.
 
 The audio selection button opens a compact menu above it, with checkboxes for
 the source file's audio tracks, with titles, language, and codec when available.
@@ -96,6 +100,8 @@ and cancellation during export. Its native check deliberately fails opening a
 replacement and verifies that rollback restores the original bytes, permissions,
 playback position, and pause state. Run `make test-trim-native` to exercise that
 recovery path without a graphical display.
+`make test-trim-titles` checks MP4 audio names through FFmpeg and libmpv for
+all-track, selected-track, silent, and replacement exports without a display.
 
 `make test-trim-keyframes` checks repeated keyframe navigation during timed
 playback, rapid clicks, and seek/source resets without a graphical display.

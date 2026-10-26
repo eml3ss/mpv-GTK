@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include "trim_export.h"
+#include "mp4_titles.h"
 
 #include <gio/gio.h>
 #include <glib/gstdio.h>
@@ -617,13 +618,24 @@ static void file_worker(GTask *task, gpointer source, gpointer data, GCancellabl
     gboolean ok = FALSE;
     switch (work->operation) {
     case OP_PREPARE: ok = prepare_files(j, &error); break;
-    case OP_SEAL:
-        ok = !cancelled(j, &error) && read_identity(j->temp, &j->verified, &error);
+    case OP_SEAL: {
+        char metadata_error[256];
+        ok = !cancelled(j, &error);
+        /* MOV/MP4 remuxing turns readable title tags back into name atoms.
+         * Normalize the remaining audio tracks before verification seals
+         * this temporary file; stream exclusions need no index remapping. */
+        if (ok && mp4_fix_audio_titles(j->temp, metadata_error, sizeof(metadata_error)) < 0) {
+            g_set_error(&error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                "Cannot preserve exported audio titles: %s", metadata_error);
+            ok = FALSE;
+        }
+        if (ok) ok = !cancelled(j, &error) && read_identity(j->temp, &j->verified, &error);
         if (ok && j->verified.size <= 0) {
             g_set_error_literal(&error, G_IO_ERROR, G_IO_ERROR_FAILED, "The export is empty."); ok = FALSE;
         }
         j->sealed = ok;
         break;
+    }
     case OP_COMMIT: ok = commit_files(j, &error); break;
     case OP_ROLLBACK: ok = rollback_files(j, &error); break;
     case OP_CLEAN_SUCCESS: ok = clean_files(j, TRUE, &error); break;

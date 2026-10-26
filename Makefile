@@ -18,10 +18,10 @@ CONFIG := build/mpv.conf
 INPUT_CONFIG := build/input.conf
 LOCALE_RESOURCE := build/locales/en.ini
 TRIM_CONFIG := build/script-opts/trim-mode.conf
-COMMON_SOURCES := src/config.c src/preferences.c src/transport.c src/i18n.c src/input.c src/key_commands.c src/keybindings.c src/keys_page.c src/about.c src/startup_trace.c src/gl_api.c src/chapters.c src/chapter_marks.c src/track_notice.c src/trim.c src/trim_backend.c src/trim_export.c src/seek_preview.c src/preview_decoder.c src/mpris.c src/mpris_art.c src/audio_scrub.c
+COMMON_SOURCES := src/config.c src/preferences.c src/transport.c src/i18n.c src/input.c src/key_commands.c src/keybindings.c src/keys_page.c src/about.c src/startup_trace.c src/gl_api.c src/chapters.c src/chapter_marks.c src/track_notice.c src/trim.c src/trim_backend.c src/trim_export.c src/mp4_titles.c src/seek_preview.c src/preview_decoder.c src/mpris.c src/mpris_art.c src/audio_scrub.c
 COMMON_OBJECTS := build/mpv-gtk-resources.o
 ICON_RESOURCE_FILES := $(wildcard data/icons/scalable/actions/*.svg data/icons/scalable/apps/*.svg) data/icons/LICENSE.GPL3 data/icons/NOTICE.txt data/icons/SOURCES.tsv
-HEADERS := src/timeline.h src/config.h src/preferences.h src/controls.h src/transport.h src/i18n.h src/input.h src/key_commands.h src/keybindings.h src/keys_page.h src/about.h src/startup_trace.h src/gl_api.h src/chapters.h src/chapter_marks.h src/track_notice.h src/trim.h src/trim_backend.h src/trim_export.h src/seek_preview.h src/preview_decoder.h src/mpris.h src/mpris_art.h src/audio_scrub.h
+HEADERS := src/timeline.h src/config.h src/preferences.h src/controls.h src/transport.h src/i18n.h src/input.h src/key_commands.h src/keybindings.h src/keys_page.h src/about.h src/startup_trace.h src/gl_api.h src/chapters.h src/chapter_marks.h src/track_notice.h src/trim.h src/trim_backend.h src/trim_export.h src/mp4_titles.h src/seek_preview.h src/preview_decoder.h src/mpris.h src/mpris_art.h src/audio_scrub.h
 STOCK_LIB := build/libmpv.so.2
 STOCK_ENGINE := build/mpv-engine
 STOCK_DATA := build/stock-mpv.json build/stock-mpv-version.txt
@@ -55,6 +55,7 @@ STARTUP_TEST := build/test-startup
 GL_API_TEST := build/test-gl-api
 GL_STARTUP_TEST := build/test-gl-startup
 TRIM_NATIVE_TEST := build/test-trim-native
+TRIM_TITLES_TEST := build/test-trim-titles
 TRIM_KEYFRAME_TEST := build/test-trim-keyframes
 TRIM_RENDER_TEST := build/test-trim-keyframe-render
 SEEK_PREVIEW_TEST := build/test-seek-preview
@@ -62,7 +63,7 @@ MPRIS_TEST := build/test-mpris
 MPRIS_ART_TEST := build/test-mpris-art
 DESKTOP := build/io.github.emless.mpvgtk.desktop
 
-.PHONY: all clean test test-trim test-trim-native test-trim-keyframes test-trim-keyframe-render test-seek-preview test-mpris test-mpris-art install uninstall FORCE
+.PHONY: all clean test test-trim test-trim-native test-trim-titles test-trim-keyframes test-trim-keyframe-render test-seek-preview test-mpris test-mpris-art install uninstall FORCE
 
 all: $(TARGET) $(CONFIG) $(INPUT_CONFIG) $(LOCALE_RESOURCE) $(TRIM_CONFIG) $(STOCK_LIB) $(STOCK_ENGINE) $(STOCK_DATA)
 
@@ -186,24 +187,32 @@ $(DESKTOP): data/io.github.emless.mpvgtk.desktop.in FORCE | build
 		desktop-file-validate "$@"; \
 	fi
 
-$(TRIM_NATIVE_TEST): tests/trim_native.c src/trim_export.c src/trim_export.h $(STOCK_LIB) | build
-	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -o "$@" tests/trim_native.c src/trim_export.c $(shell $(PKG_CONFIG) --libs gio-2.0 mpv) -lm
+$(TRIM_NATIVE_TEST): tests/trim_native.c src/trim_export.c src/trim_export.h src/mp4_titles.c src/mp4_titles.h $(STOCK_LIB) | build
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -o "$@" tests/trim_native.c src/trim_export.c src/mp4_titles.c $(shell $(PKG_CONFIG) --libs gio-2.0 mpv) -lm
 
 test-trim-native: $(TRIM_NATIVE_TEST)
 	@./$(TRIM_NATIVE_TEST); status=$$?; \
 	if [ "$$status" -eq 77 ]; then printf '%s\n' 'Native Trim Mode check skipped (FFmpeg unavailable).'; \
 	elif [ "$$status" -ne 0 ]; then exit "$$status"; fi
 
-$(TRIM_KEYFRAME_TEST): tests/trim_keyframes.c src/trim_backend.c src/trim_backend.h src/trim_export.c src/trim_export.h src/keybindings.h $(STOCK_LIB) | build
-	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -o "$@" tests/trim_keyframes.c src/trim_backend.c src/trim_export.c $(shell $(PKG_CONFIG) --libs gio-2.0 mpv) -lm
+$(TRIM_TITLES_TEST): tests/trim_titles.c src/trim_export.c src/trim_export.h src/mp4_titles.c src/mp4_titles.h $(STOCK_LIB) | build
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -o "$@" tests/trim_titles.c src/trim_export.c src/mp4_titles.c $(shell $(PKG_CONFIG) --libs gio-2.0 mpv) -lm
+
+test-trim-titles: $(TRIM_TITLES_TEST)
+	@./$(TRIM_TITLES_TEST); status=$$?; \
+	if [ "$$status" -eq 77 ]; then printf '%s\n' 'Trim title check skipped (FFmpeg tools unavailable).'; \
+	elif [ "$$status" -ne 0 ]; then exit "$$status"; fi
+
+$(TRIM_KEYFRAME_TEST): tests/trim_keyframes.c src/trim_backend.c src/trim_backend.h src/trim_export.c src/trim_export.h src/mp4_titles.c src/mp4_titles.h src/keybindings.h $(STOCK_LIB) | build
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -o "$@" tests/trim_keyframes.c src/trim_backend.c src/trim_export.c src/mp4_titles.c $(shell $(PKG_CONFIG) --libs gio-2.0 mpv) -lm
 
 test-trim-keyframes: $(TRIM_KEYFRAME_TEST)
 	@./$(TRIM_KEYFRAME_TEST); status=$$?; \
 	if [ "$$status" -eq 77 ]; then printf '%s\n' 'Trim keyframe check skipped (FFmpeg tools unavailable).'; \
 	elif [ "$$status" -ne 0 ]; then exit "$$status"; fi
 
-$(TRIM_RENDER_TEST): tests/trim_keyframe_render.c tests/trim_keyframes.c src/trim_backend.c src/trim_backend.h src/trim_export.c src/trim_export.h src/keybindings.h $(STOCK_LIB) | build
-	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -o "$@" tests/trim_keyframe_render.c src/trim_backend.c src/trim_export.c $(shell $(PKG_CONFIG) --libs gio-2.0 mpv) -lm
+$(TRIM_RENDER_TEST): tests/trim_keyframe_render.c tests/trim_keyframes.c src/trim_backend.c src/trim_backend.h src/trim_export.c src/trim_export.h src/mp4_titles.c src/mp4_titles.h src/keybindings.h $(STOCK_LIB) | build
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -o "$@" tests/trim_keyframe_render.c src/trim_backend.c src/trim_export.c src/mp4_titles.c $(shell $(PKG_CONFIG) --libs gio-2.0 mpv) -lm
 
 test-trim-keyframe-render: $(TRIM_RENDER_TEST)
 	@./$(TRIM_RENDER_TEST); status=$$?; \
@@ -234,9 +243,9 @@ test-mpris-art: $(MPRIS_ART_TEST)
 	if [ "$$status" -eq 77 ]; then printf '%s\n' 'MPRIS artwork check skipped (FFmpeg unavailable).'; \
 	elif [ "$$status" -ne 0 ]; then exit "$$status"; fi
 
-test: test-mpris test-mpris-art test-trim-keyframes test-trim-keyframe-render
+test: test-mpris test-mpris-art test-trim-titles test-trim-keyframes test-trim-keyframe-render
 
-test-trim: all test-trim-native test-trim-keyframes test-trim-keyframe-render
+test-trim: all test-trim-native test-trim-titles test-trim-keyframes test-trim-keyframe-render
 	@MPV_GTK_BINARY="$(abspath $(TARGET))" python3 tests/trim.py; \
 	status=$$?; \
 	if [ "$$status" -eq 77 ]; then \
@@ -362,7 +371,7 @@ uninstall:
 
 clean:
 	rm -f "$(SEEK_PREVIEW_TEST)"
-	rm -f "$(TRIM_NATIVE_TEST)"
+	rm -f "$(TRIM_NATIVE_TEST)" "$(TRIM_TITLES_TEST)"
 	rm -f "$(TRIM_KEYFRAME_TEST)"
 	rm -f "$(TRIM_RENDER_TEST)"
 	rm -f build/trim-licenses/LICENSE.LGPL build/trim-licenses/NOTICE.txt build/scripts/trim-mode.lua build/scripts/LICENSE.LGPL build/scripts/NOTICE.txt
