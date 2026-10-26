@@ -14,6 +14,8 @@
 #define QUERY_BASE (UINT64_C(1) << 53)
 #define QUERY_LIMIT (QUERY_BASE + (UINT64_C(1) << 32))
 #define ICON_RESOURCE "/io/github/emless/mpvgtk/icons/scalable/apps/io.github.emless.mpvgtk.svg"
+#define ART_MAX_SIDE 1024
+#define ART_PIXEL_LIMIT (16 * 1024 * 1024)
 
 typedef struct { const char *name; mpv_format format; } ArtProperty;
 static const ArtProperty properties[] = {
@@ -167,8 +169,10 @@ static void file_worker(GTask *task, gpointer source, gpointer data, GCancellabl
         } else if (work->kind == WORK_PNG && art->directory) {
             gsize size;
             const guchar *input = g_bytes_get_data(work->pixels, &size);
-            if (work->width > 0 && work->width <= 160 && work->height > 0 && work->height <= 90 &&
-                work->stride >= work->width * 4 && size >= (gsize)work->stride * work->height) {
+            if (work->width > 0 && work->width <= ART_MAX_SIDE &&
+                work->height > 0 && work->height <= ART_MAX_SIDE &&
+                work->stride >= work->width * 4 && work->stride <= ART_MAX_SIDE * 4 &&
+                size <= ART_PIXEL_LIMIT && size >= (gsize)work->stride * work->height) {
                 gsize stride = (gsize)work->width * 4;
                 guchar *rgba = g_malloc(stride * work->height);
                 for (int y = 0; y < work->height; ++y) for (int x = 0; x < work->width; ++x) {
@@ -353,7 +357,7 @@ MprisArt *mpris_art_new(mpv_handle *mpv, MprisArtCallback callback, gpointer dat
     art->cancel = g_cancellable_new();
     art->samples = g_hash_table_new_full(g_int64_hash, g_int64_equal, g_free, g_free);
     g_mutex_init(&art->files_mutex);
-    art->decoder = preview_decoder_new(decoded_frame, art);
+    art->decoder = preview_decoder_new_sized(decoded_frame, art, ART_MAX_SIDE, ART_MAX_SIDE);
     reset_source(art, FALSE);
     ArtWork *work = g_new0(ArtWork, 1); work->kind = WORK_ICON;
     run_work(art, work);

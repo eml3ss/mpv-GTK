@@ -20,6 +20,11 @@ typedef void (*PreviewDecoderCallback)(const PreviewDecoderFrame *frame, gpointe
  * Frames and error strings are borrowed for the callback; retain pixels with
  * g_bytes_ref() when needed. Cancel keeps the paused decoder warm briefly. */
 PreviewDecoder *preview_decoder_new(PreviewDecoderCallback callback, gpointer data);
+/* Higher-quality output bounded by immutable dimensions in 1..1024. Native
+ * display dimensions are preserved for smaller sources. Invalid bounds return
+ * NULL; the default constructor remains the fast 160x90 hover decoder. */
+PreviewDecoder *preview_decoder_new_sized(PreviewDecoderCallback callback, gpointer data,
+                                          int max_width, int max_height);
 void preview_decoder_request(PreviewDecoder *decoder, const char *source_key,
                               const char *filename, gint64 ff_index,
                               double seconds, guint64 token);

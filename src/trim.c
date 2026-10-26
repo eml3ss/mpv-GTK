@@ -8,6 +8,8 @@
 
 #define TRIM_OBSERVE_BASE (UINT64_C(1) << 40)
 #define TRIM_FRAME_ID (UINT64_C(1) << 41)
+#define TRIM_VIDEO_OBSERVE_ID (UINT64_C(1) << 42)
+#define TRIM_VIDEO_REQUEST_BASE (UINT64_C(1) << 43)
 #define TRIM_SELECTION_DURATION_US INT64_C(200000)
 
 typedef enum { SCISSORS, KEY_PREVIOUS, KEY_NEXT, SET_START, SET_END,
@@ -36,6 +38,8 @@ struct TrimMode {
     int marks_width, marks_height;
     gint64 marks_duration;
     gboolean active, available, ready, stopped, busy, updating, dragging, small;
+    gboolean video_available, mode_enabled, media_loading;
+    guint64 video_request, video_serial;
     int requested;
     guint seek_source, restore_source;
     guint64 serial, entry_serial[2];
@@ -736,6 +740,8 @@ static void update_sensitivity(TrimMode *t)
 
 static void set_active(TrimMode *t, gboolean active)
 {
+    t->mode_enabled = active;
+    active = active && t->video_available;
     if (active) build_controls(t);
     t->active = active;
     if (!active) {
@@ -757,6 +763,24 @@ static void set_active(TrimMode *t, gboolean active)
     gtk_accessible_update_state(GTK_ACCESSIBLE(t->button), GTK_ACCESSIBLE_STATE_PRESSED,
         active ? GTK_ACCESSIBLE_TRISTATE_TRUE : GTK_ACCESSIBLE_TRISTATE_FALSE, -1);
     if (!active) send_action(t, "gtk-focus", "no");
+}
+
+static void set_video_track(TrimMode *t, const mpv_node *video)
+{
+    gboolean available = video && video->format == MPV_FORMAT_NODE_MAP &&
+        !flag_field(video, "image") && !flag_field(video, "albumart");
+    if (available == t->video_available) return;
+    t->video_available = available;
+    gtk_widget_set_visible(t->button, available);
+    set_active(t, t->mode_enabled);
+}
+
+static void request_video_track(TrimMode *t)
+{
+    if (!t->host.mpv || t->stopped) return;
+    t->video_request = TRIM_VIDEO_REQUEST_BASE + ++t->video_serial;
+    if (mpv_get_property_async(t->host.mpv, t->video_request, "current-tracks/video", MPV_FORMAT_NODE) < 0)
+        t->video_request = 0;
 }
 
 static void load_backend(TrimMode *t)
@@ -793,7 +817,10 @@ TrimMode *trim_mode_new(const TrimHost *host)
     t->audio_choices = g_ptr_array_new_with_free_func(audio_choice_free);
     t->audio_file_serial = -1;
     t->button = g_object_ref_sink(glyph_button(SCISSORS, "Режим обрезки · Ctrl+T"));
+    gtk_widget_set_visible(t->button, FALSE);
     gtk_actionable_set_action_name(GTK_ACTIONABLE(t->button), "app.trim");
+    if (t->host.mpv)
+        mpv_observe_property(t->host.mpv, TRIM_VIDEO_OBSERVE_ID, "current-tracks/video", MPV_FORMAT_NODE);
     g_autofree char *directory = g_path_get_dirname(t->config_path);
     g_autofree char *conf = g_build_filename(directory, "script-opts", "trim-mode.conf", NULL);
     g_autofree char *contents = NULL;
@@ -814,6 +841,14 @@ gboolean trim_mode_audio_menu_open(const TrimMode *t)
 void trim_mode_toggle(TrimMode *t)
 {
     if (!t || t->stopped) return;
+    if (!t->video_available && t->host.mpv && !t->media_loading) {
+        /* Explicit activation can precede the deferred track observation. */
+        mpv_node video = {0};
+        if (mpv_get_property(t->host.mpv, "current-tracks/video", MPV_FORMAT_NODE, &video) >= 0)
+            set_video_track(t, &video);
+        mpv_free_node_contents(&video);
+    }
+    if (!t->video_available) return;
     if (t->active && t->group) {
         GtkWidget *focus = gtk_window_get_focus(t->host.window);
         for (int i = 0; i < 2; ++i)
@@ -888,6 +923,26 @@ void trim_mode_translate(TrimMode *t)
 gboolean trim_mode_handle_event(TrimMode *t, const mpv_event *event)
 {
     if (!t || t->stopped) return FALSE;
+    if (event->event_id == MPV_EVENT_PROPERTY_CHANGE && event->reply_userdata == TRIM_VIDEO_OBSERVE_ID) {
+        const mpv_event_property *property = event->data;
+        const mpv_node *video = property && property->format == MPV_FORMAT_NODE ? property->data : NULL;
+        if (!t->media_loading) set_video_track(t, video);
+        return TRUE;
+    }
+    if (event->event_id == MPV_EVENT_GET_PROPERTY_REPLY &&
+        event->reply_userdata >= TRIM_VIDEO_REQUEST_BASE && event->reply_userdata < (UINT64_C(1) << 44)) {
+        if (event->reply_userdata == t->video_request) {
+            t->video_request = 0;
+            const mpv_event_property *property = event->data;
+            if (!t->media_loading && event->error >= 0 && property && property->format == MPV_FORMAT_NODE)
+                set_video_track(t, property->data);
+        }
+        return TRUE;
+    }
+    if (event->event_id == MPV_EVENT_FILE_LOADED) {
+        t->media_loading = FALSE;
+        request_video_track(t);
+    } else if (event->event_id == MPV_EVENT_VIDEO_RECONFIG && !t->media_loading) request_video_track(t);
     if (t->backend && trim_backend_handle_event(t->backend, event)) return TRUE;
     if (event->event_id == MPV_EVENT_GET_PROPERTY_REPLY && event->reply_userdata == TRIM_FRAME_ID) {
         const mpv_event_property *property = event->data;
@@ -898,6 +953,11 @@ gboolean trim_mode_handle_event(TrimMode *t, const mpv_event *event)
         return TRUE;
     }
     if (event->event_id == MPV_EVENT_START_FILE || event->event_id == MPV_EVENT_END_FILE) {
+        t->media_loading = TRUE;
+        t->video_request = 0;
+        t->video_available = FALSE;
+        gtk_widget_set_visible(t->button, FALSE);
+        set_active(t, t->mode_enabled);
         t->available = t->dragging = FALSE;
         t->selection_animated = FALSE;
         t->frame = -1;
@@ -928,7 +988,7 @@ gboolean trim_mode_handle_event(TrimMode *t, const mpv_event *event)
             }
         }
         if (t->requested >= 0) {
-            if (t->active == t->requested) t->requested = -1;
+            if (t->mode_enabled == t->requested) t->requested = -1;
             else send_action(t, "set-enabled", t->requested ? "yes" : "no");
         }
     } else if (event->reply_userdata == TRIM_OBSERVE_BASE + 1) {
@@ -992,6 +1052,7 @@ void trim_mode_shutdown(TrimMode *t)
     if (!t || t->stopped) return;
     if (t->audio_button) gtk_menu_button_popdown(GTK_MENU_BUTTON(t->audio_button));
     t->stopped = TRUE;
+    if (t->host.mpv) mpv_unobserve_property(t->host.mpv, TRIM_VIDEO_OBSERVE_ID);
     t->selection_animated = FALSE;
     trim_backend_shutdown(t->backend);
     if (t->seek_source) { g_source_remove(t->seek_source); t->seek_source = 0; }

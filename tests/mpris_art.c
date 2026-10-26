@@ -6,6 +6,7 @@
 #include <gio/gio.h>
 #include <glib/gstdio.h>
 #include <locale.h>
+#include <math.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -78,12 +79,37 @@ static gboolean color(ArtHost *host, gboolean red)
     if (!pixbuf) return FALSE;
     int width = gdk_pixbuf_get_width(pixbuf), height = gdk_pixbuf_get_height(pixbuf);
     g_assert_cmpint(width, >, 0); g_assert_cmpint(height, >, 0);
-    g_assert_cmpint(width, <=, 160); g_assert_cmpint(height, <=, 90);
+    g_assert_cmpint(width, <=, 1024); g_assert_cmpint(height, <=, 1024);
     int channels = gdk_pixbuf_get_n_channels(pixbuf);
     const guchar *pixel = gdk_pixbuf_read_pixels(pixbuf) +
         gdk_pixbuf_get_rowstride(pixbuf) * (height / 2) + channels * (width / 2);
     return red ? pixel[0] > 180 && pixel[1] < 70 && pixel[2] < 70
         : pixel[2] > 180 && pixel[0] < 70 && pixel[1] < 70;
+}
+
+static void assert_quality(ArtHost *host, gboolean red)
+{
+    g_autofree char *filename = local_art_file(host);
+    g_autoptr(GdkPixbuf) image = gdk_pixbuf_new_from_file(filename, NULL);
+    g_assert_nonnull(image);
+    int width = gdk_pixbuf_get_width(image), height = gdk_pixbuf_get_height(image);
+    /* Real source detail must survive; enlarging an old 160x90 thumbnail
+     * could satisfy dimensions alone but loses these four-pixel stripes. */
+    g_assert_cmpint(width, ==, red ? 768 : 1024);
+    g_assert_cmpint(height, ==, red ? 768 : 576);
+    g_assert_cmpint(width, >, 160); g_assert_cmpint(height, >, 90);
+    double scale = (double)width / (red ? 768 : 1280);
+    int y = (int)lround((100.5 * scale) - .5);
+    int channels = gdk_pixbuf_get_n_channels(image);
+    const guchar *pixels = gdk_pixbuf_read_pixels(image);
+    int stride = gdk_pixbuf_get_rowstride(image);
+    for (int stripe = 2; stripe < 26; ++stripe) {
+        int x = (int)lround(((40 + stripe * 4 + 2.5) * scale) - .5);
+        const guchar *sample = pixels + y * stride + x * channels;
+        int brightness = (sample[0] + sample[1] + sample[2]) / 3;
+        if (stripe % 2) g_assert_cmpint(brightness, <, 70);
+        else g_assert_cmpint(brightness, >, 180);
+    }
 }
 
 static void wait_color(ArtHost *host, gboolean red)
@@ -94,6 +120,7 @@ static void wait_color(ArtHost *host, gboolean red)
             g_error("No %s artwork frame: %s", red ? "red cover" : "blue video", host->uri ? host->uri : "none");
         pump(host, 1000);
     }
+    assert_quality(host, red);
 }
 
 static char *wait_icon(ArtHost *host, gboolean current)
@@ -133,16 +160,36 @@ static void run_ffmpeg(char **arguments)
         g_error("Cannot generate artwork fixture: %s; %s", error->message, diagnostic ? diagnostic : "");
 }
 
-static void fixtures(const char *video, const char *audio, const char *cover, const char *cover_audio)
+static void stripe_patch(GdkPixbuf *image)
 {
-    g_autoptr(GdkPixbuf) image = gdk_pixbuf_new(GDK_COLORSPACE_RGB, FALSE, 8, 96, 96);
+    guchar *pixels = gdk_pixbuf_get_pixels(image);
+    int stride = gdk_pixbuf_get_rowstride(image), channels = gdk_pixbuf_get_n_channels(image);
+    for (int y = 40; y < 168; ++y) {
+        for (int x = 40; x < 296; ++x) {
+            guchar value = ((x - 40) / 4) % 2 ? 0 : 255;
+            for (int channel = 0; channel < 3; ++channel)
+                pixels[y * stride + x * channels + channel] = value;
+        }
+    }
+}
+
+static void fixtures(const char *video, const char *audio, const char *cover,
+                       const char *cover_audio, const char *video_frame)
+{
+    g_autoptr(GdkPixbuf) image = gdk_pixbuf_new(GDK_COLORSPACE_RGB, FALSE, 8, 768, 768);
     gdk_pixbuf_fill(image, UINT32_C(0xff0000ff));
+    stripe_patch(image);
     g_autoptr(GError) error = NULL;
     g_assert_true(gdk_pixbuf_save(image, cover, "png", &error, NULL));
     g_assert_no_error(error);
-    char *video_args[] = {"ffmpeg", "-nostdin", "-v", "error", "-f", "lavfi", "-i",
-        "color=c=blue:s=320x180:r=20:d=3", "-c:v", "libx264", "-preset", "ultrafast", "-threads", "1",
-        "-g", "20", (char *)video, NULL};
+    g_autoptr(GdkPixbuf) frame = gdk_pixbuf_new(GDK_COLORSPACE_RGB, FALSE, 8, 1280, 720);
+    gdk_pixbuf_fill(frame, UINT32_C(0x0000ffff));
+    stripe_patch(frame);
+    g_assert_true(gdk_pixbuf_save(frame, video_frame, "png", &error, NULL));
+    g_assert_no_error(error);
+    char *video_args[] = {"ffmpeg", "-nostdin", "-v", "error", "-loop", "1", "-framerate", "20", "-i",
+        (char *)video_frame, "-t", "3", "-c:v", "libx264", "-preset", "ultrafast", "-threads", "1",
+        "-g", "20", "-pix_fmt", "yuv420p", (char *)video, NULL};
     run_ffmpeg(video_args);
     char *audio_args[] = {"ffmpeg", "-nostdin", "-v", "error", "-f", "lavfi", "-i",
         "sine=frequency=440:sample_rate=48000:duration=3", "-c:a", "flac", (char *)audio, NULL};
@@ -214,7 +261,8 @@ int main(void)
     g_autofree char *audio = g_build_filename(directory, "Audio.flac", NULL);
     g_autofree char *cover = g_build_filename(directory, "Red cover.png", NULL);
     g_autofree char *cover_audio = g_build_filename(directory, "Covered audio.mp3", NULL);
-    fixtures(video, audio, cover, cover_audio);
+    g_autofree char *video_frame = g_build_filename(directory, "Detailed video frame.png", NULL);
+    fixtures(video, audio, cover, cover_audio, video_frame);
     ArtHost host = {.mpv = new_core(), .live = TRUE};
     load(&host, video);
     wait_loaded(&host);
@@ -265,6 +313,6 @@ int main(void)
     pump(&host, 200000);
     g_free(host.uri); g_free(host.icon_uri);
     remove_tree(directory);
-    puts("PASS MPRIS artwork: native video/embedded-cover PNGs, fallback, private cache, source replacement and safe teardown.");
+    puts("PASS MPRIS artwork: detailed 1024x576 video/768x768 cover PNGs, fallback, private cache, source replacement and safe teardown.");
     return 0;
 }

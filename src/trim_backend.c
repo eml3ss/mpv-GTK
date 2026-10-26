@@ -306,7 +306,7 @@ static void publish_failure(TrimBackend *b, const char *message)
 
 static void update_shortcuts(TrimBackend *b)
 {
-    gboolean active = !b->stopped && b->enabled && !b->gtk_editing;
+    gboolean active = !b->stopped && b->enabled && available(b) && !b->gtk_editing;
     if (active == b->shortcuts_active) return;
     b->shortcuts_active = active;
     if (active) {

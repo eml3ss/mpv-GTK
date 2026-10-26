@@ -12,6 +12,9 @@ seeking is available, and adjacent queue entries exist.
 Desktop widgets also receive a thumbnail for local videos or the embedded
 cover for audio files. The player icon appears while artwork is loading or
 when an image is unavailable.
+Artwork fits within 1024 × 1024 pixels, preserves the source aspect ratio,
+and does not enlarge smaller source images. It uses a separate high-quality
+decode; interactive timeline previews retain their small, fast output.
 
 For example, with playerctl installed:
 

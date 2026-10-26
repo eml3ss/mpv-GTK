@@ -8,9 +8,10 @@
 #define REFINE_DELAY_US INT64_C(150000)
 #define WARM_IDLE_US INT64_C(30000000)
 #define DECODE_TIMEOUT_US INT64_C(5000000)
-#define PIXEL_LIMIT (4 * 1024 * 1024)
+#define PIXEL_LIMIT (16 * 1024 * 1024)
 #define PREVIEW_WIDTH 160
 #define PREVIEW_HEIGHT 90
+#define OUTPUT_DIMENSION_LIMIT 1024
 
 typedef struct {
     char *key, *filename;
@@ -27,6 +28,8 @@ struct PreviewDecoder {
     GMainContext *context;
     PreviewDecoderCallback callback;
     gpointer data;
+    int max_width, max_height;
+    gboolean high_quality;
     gboolean enabled, active, stopped, worker_started, nvdec;
     guint64 revision;
     gint64 last_activity;
@@ -49,6 +52,8 @@ typedef struct {
     DecoderPhase phase;
     gboolean loaded, load_acknowledged, saw_start, file_ready;
     gboolean seek_acknowledged, saw_seek, nvdec;
+    int max_width, max_height;
+    gboolean high_quality;
     double seek_seconds;
     gint64 deadline, refine_at;
 } DecoderWorker;
@@ -181,10 +186,17 @@ static gboolean flag(mpv_handle *core, const char *name, gboolean fallback)
     return mpv_get_property(core, name, MPV_FORMAT_FLAG, &value) >= 0 ? value != 0 : fallback;
 }
 
-static mpv_handle *create_core(gboolean nvdec, char **error)
+static mpv_handle *create_core(DecoderWorker *worker, char **error)
 {
     mpv_handle *core = mpv_create();
     if (!core) { *error = g_strdup("Could not create the preview decoder."); return NULL; }
+    /* Fit display dimensions, including sample aspect ratio. Artwork retains
+     * its native display resolution when it is smaller than the requested box. */
+    g_autofree char *filter = worker->high_quality
+        ? g_strdup_printf("lavfi=[scale=w='max(1,trunc(min(min(%d,%d*dar),iw*sar)))':h='max(1,trunc(min(min(%d,%d/dar),ih)))':flags=bicubic,setsar=1,format=bgra]",
+            worker->max_width, worker->max_height, worker->max_height, worker->max_width)
+        : g_strdup_printf("lavfi=[scale=w='max(2,trunc(min(%d,%d*dar)/2)*2)':h='max(2,trunc(min(%d,%d/dar)/2)*2)':flags=fast_bilinear,setsar=1,format=bgra]",
+            worker->max_width, worker->max_height, worker->max_height, worker->max_width);
     const struct { const char *name, *value; gboolean optional; } options[] = {
         {"config", "no", FALSE}, {"terminal", "no", FALSE},
         {"input-terminal", "no", FALSE}, {"input-default-bindings", "no", FALSE},
@@ -192,15 +204,15 @@ static mpv_handle *create_core(gboolean nvdec, char **error)
         {"audio", "no", FALSE}, {"sub", "no", FALSE},
         {"pause", "yes", FALSE}, {"idle", "yes", FALSE},
         {"keep-open", "always", FALSE}, {"force-window", "no", FALSE},
-        {"hwdec", nvdec ? "nvdec-copy" : "no", FALSE},
+        {"hwdec", worker->nvdec ? "nvdec-copy" : "no", FALSE},
         {"rebase-start-time", "no", FALSE},
         {"hr-seek", "no", FALSE}, {"cache", "no", FALSE},
         {"demuxer-readahead-secs", "0", FALSE},
         {"demuxer-max-bytes", "128KiB", FALSE},
         {"demuxer-max-back-bytes", "128KiB", FALSE},
-        {"vd-lavc-fast", "yes", FALSE},
-        {"vd-lavc-skiploopfilter", "all", FALSE},
-        {"sws-scaler", "fast-bilinear", FALSE},
+        {"vd-lavc-fast", worker->high_quality ? "no" : "yes", FALSE},
+        {"vd-lavc-skiploopfilter", worker->high_quality ? "none" : "all", FALSE},
+        {"sws-scaler", worker->high_quality ? "bicubic" : "fast-bilinear", FALSE},
         {"sws-allow-zimg", "no", TRUE},
         {"load-scripts", "no", TRUE}, {"osc", "no", TRUE},
         {"ytdl", "no", TRUE}, {"load-stats-overlay", "no", TRUE},
@@ -208,7 +220,7 @@ static mpv_handle *create_core(gboolean nvdec, char **error)
         {"load-select", "no", TRUE}, {"load-positioning", "no", TRUE},
         {"load-commands", "no", TRUE}, {"load-context-menu", "no", TRUE},
         {"resume-playback", "no", FALSE}, {"save-position-on-quit", "no", FALSE},
-        {"vf", "lavfi=[scale=w='max(2,trunc(min(160,90*dar)/2)*2)':h='max(2,trunc(min(90,160/dar)/2)*2)':flags=fast_bilinear,setsar=1,format=bgra]", FALSE}
+        {"vf", filter, FALSE}
     };
     for (guint i = 0; i < G_N_ELEMENTS(options); ++i) {
         int status = mpv_set_option_string(core, options[i].name, options[i].value);
@@ -318,11 +330,12 @@ static void load_movie(DecoderWorker *worker)
 }
 
 static GBytes *pack_pixels(const guchar *input, int width, int height, int stride,
+                            int max_width, int max_height,
                             int *output_width, int *output_height)
 {
     /* mpv applies container rotation after the user filter. A bounded
      * landscape frame can therefore arrive in portrait orientation here. */
-    double factor = MIN(1.0, MIN((double)PREVIEW_WIDTH / width, (double)PREVIEW_HEIGHT / height));
+    double factor = MIN(1.0, MIN((double)max_width / width, (double)max_height / height));
     int w = MAX(1, (int)floor(width * factor + .5));
     int h = MAX(1, (int)floor(height * factor + .5));
     gsize packed_stride = (gsize)w * 4;
@@ -374,8 +387,9 @@ static void capture_frame(DecoderWorker *worker, gboolean refined)
     gint64 width = integer_field(&result, "w", 0), height = integer_field(&result, "h", 0);
     gint64 stride = integer_field(&result, "stride", 0);
     const mpv_node *data = field(&result, "data");
-    gboolean valid = status >= 0 && width > 0 && width <= PREVIEW_WIDTH &&
-        height > 0 && height <= PREVIEW_WIDTH &&
+    int raw_dimension_limit = MAX(worker->max_width, worker->max_height);
+    gboolean valid = status >= 0 && width > 0 && width <= raw_dimension_limit &&
+        height > 0 && height <= raw_dimension_limit &&
         stride >= width * 4 && stride <= PIXEL_LIMIT &&
         g_strcmp0(text_field(&result, "format"), "bgra") == 0 &&
         data && data->format == MPV_FORMAT_BYTE_ARRAY && data->u.ba && data->u.ba->data &&
@@ -385,6 +399,7 @@ static void capture_frame(DecoderWorker *worker, gboolean refined)
     int output_width = 0, output_height = 0;
     if (valid) {
         pixels = pack_pixels(data->u.ba->data, (int)width, (int)height, (int)stride,
+                             worker->max_width, worker->max_height,
                              &output_width, &output_height);
     }
     mpv_free_node_contents(&result);
@@ -486,7 +501,7 @@ static gboolean update_request(DecoderWorker *worker, gboolean *enabled, gboolea
     }
     if (!worker->core) {
         g_autofree char *error = NULL;
-        worker->core = create_core(worker->nvdec, &error);
+        worker->core = create_core(worker, &error);
         if (!worker->core) {
             report_failure(worker, error ? error : "Could not initialize the preview decoder.");
             return TRUE;
@@ -508,7 +523,8 @@ static gboolean update_request(DecoderWorker *worker, gboolean *enabled, gboolea
 static gpointer decoder_thread(gpointer data)
 {
     PreviewDecoder *decoder = data;
-    DecoderWorker worker = {.owner = decoder};
+    DecoderWorker worker = {.owner = decoder, .max_width = decoder->max_width,
+        .max_height = decoder->max_height, .high_quality = decoder->high_quality};
     for (;;) {
         gboolean enabled, active;
         gint64 last_activity;
@@ -545,18 +561,35 @@ static gpointer decoder_thread(gpointer data)
     return NULL;
 }
 
-PreviewDecoder *preview_decoder_new(PreviewDecoderCallback callback, gpointer data)
+static PreviewDecoder *new_decoder(PreviewDecoderCallback callback, gpointer data,
+                                    int max_width, int max_height, gboolean high_quality)
 {
     PreviewDecoder *decoder = g_new0(PreviewDecoder, 1);
     decoder->references = 1;
     decoder->enabled = TRUE;
     decoder->callback = callback;
     decoder->data = data;
+    decoder->max_width = max_width;
+    decoder->max_height = max_height;
+    decoder->high_quality = high_quality;
     decoder->context = g_main_context_ref_thread_default();
     decoder->last_activity = g_get_monotonic_time();
     g_mutex_init(&decoder->mutex);
     g_cond_init(&decoder->condition);
     return decoder;
+}
+
+PreviewDecoder *preview_decoder_new(PreviewDecoderCallback callback, gpointer data)
+{
+    return new_decoder(callback, data, PREVIEW_WIDTH, PREVIEW_HEIGHT, FALSE);
+}
+
+PreviewDecoder *preview_decoder_new_sized(PreviewDecoderCallback callback, gpointer data,
+                                          int max_width, int max_height)
+{
+    if (max_width < 1 || max_width > OUTPUT_DIMENSION_LIMIT ||
+        max_height < 1 || max_height > OUTPUT_DIMENSION_LIMIT) return NULL;
+    return new_decoder(callback, data, max_width, max_height, TRUE);
 }
 
 void preview_decoder_request(PreviewDecoder *decoder, const char *source_key,

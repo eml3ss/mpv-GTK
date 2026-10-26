@@ -33,7 +33,7 @@ from unfinished interface work. Item 16 is tentative.
 
 - [x] Expose playback state, metadata, and controls through MPRIS.
 - [x] Support desktop media controls, media keys routed by the desktop, and playerctl.
-- [x] Supply local-video thumbnails, audio cover art, and a player-icon fallback to desktop media widgets.
+- [x] Supply video thumbnails and audio cover art up to 1024 × 1024, with a player-icon fallback, to desktop media widgets.
 
 ## 6. Prevent screen blanking during playback
 
@@ -98,6 +98,7 @@ implementation task. Queue restoration remains a separate task under item 2.
 - [x] Show the selected range, keyframe markers, millisecond time, and current frame number.
 - [x] Animate both selection edges with the original 200 ms easing and smooth retargeting.
 - [x] Keep the standard toolbar buttons aligned in both trim layouts.
+- [x] Hide Trim Mode for audio files, including tracks with embedded cover art.
 - [x] Edit start/end times and set either boundary from the playback position.
 - [x] Navigate previous/next keyframes and preserve mode-specific shortcuts.
 - [x] Export a separate copy or replace the original using the native lossless backend.

@@ -5,6 +5,9 @@ Click or press it again to restore the playback controls. Video stays in the
 same GTK/Wayland window. The interface uses the current GTK theme and accent.
 
 Trim Mode is implemented entirely in C and does not load a Lua script.
+Its button is hidden for audio files, including files with embedded cover art.
+Audio playback keeps the regular controls even if Trim Mode was active for
+the preceding video; returning to video restores that mode.
 
 ## Controls
 
