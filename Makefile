@@ -18,10 +18,10 @@ CONFIG := build/mpv.conf
 INPUT_CONFIG := build/input.conf
 LOCALE_RESOURCE := build/locales/en.ini
 TRIM_CONFIG := build/script-opts/trim-mode.conf
-COMMON_SOURCES := src/config.c src/preferences.c src/transport.c src/i18n.c src/input.c src/key_commands.c src/keybindings.c src/keys_page.c src/about.c src/startup_trace.c src/gl_api.c src/chapters.c src/chapter_marks.c src/track_notice.c src/trim.c src/trim_backend.c src/trim_export.c src/mp4_titles.c src/seek_preview.c src/preview_decoder.c src/mpris.c src/mpris_art.c src/audio_scrub.c
+COMMON_SOURCES := src/config.c src/preferences.c src/transport.c src/i18n.c src/input.c src/key_commands.c src/keybindings.c src/keys_page.c src/about.c src/startup_trace.c src/gl_api.c src/chapters.c src/chapter_marks.c src/track_notice.c src/trim.c src/trim_backend.c src/trim_export.c src/mp4_titles.c src/seek_preview.c src/preview_decoder.c src/mpris.c src/mpris_art.c src/audio_scrub.c src/queue_model.c src/queue_view.c
 COMMON_OBJECTS := build/mpv-gtk-resources.o
 ICON_RESOURCE_FILES := $(wildcard data/icons/scalable/actions/*.svg data/icons/scalable/apps/*.svg) data/icons/LICENSE.GPL3 data/icons/NOTICE.txt data/icons/SOURCES.tsv
-HEADERS := src/timeline.h src/config.h src/preferences.h src/controls.h src/transport.h src/i18n.h src/input.h src/key_commands.h src/keybindings.h src/keys_page.h src/about.h src/startup_trace.h src/gl_api.h src/chapters.h src/chapter_marks.h src/track_notice.h src/trim.h src/trim_backend.h src/trim_export.h src/mp4_titles.h src/seek_preview.h src/preview_decoder.h src/mpris.h src/mpris_art.h src/audio_scrub.h
+HEADERS := src/timeline.h src/config.h src/preferences.h src/controls.h src/transport.h src/i18n.h src/input.h src/key_commands.h src/keybindings.h src/keys_page.h src/about.h src/startup_trace.h src/gl_api.h src/chapters.h src/chapter_marks.h src/track_notice.h src/trim.h src/trim_backend.h src/trim_export.h src/mp4_titles.h src/seek_preview.h src/preview_decoder.h src/mpris.h src/mpris_art.h src/audio_scrub.h src/queue_model.h src/queue_view.h
 STOCK_LIB := build/libmpv.so.2
 STOCK_ENGINE := build/mpv-engine
 STOCK_DATA := build/stock-mpv.json build/stock-mpv-version.txt
@@ -61,9 +61,11 @@ TRIM_RENDER_TEST := build/test-trim-keyframe-render
 SEEK_PREVIEW_TEST := build/test-seek-preview
 MPRIS_TEST := build/test-mpris
 MPRIS_ART_TEST := build/test-mpris-art
+QUEUE_MODEL_TEST := build/test-queue-model
+QUEUE_VIEW_TEST := build/test-queue-view
 DESKTOP := build/io.github.emless.mpvgtk.desktop
 
-.PHONY: all clean test test-trim test-trim-native test-trim-titles test-trim-keyframes test-trim-keyframe-render test-seek-preview test-mpris test-mpris-art install uninstall FORCE
+.PHONY: all clean test test-trim test-trim-native test-trim-titles test-trim-keyframes test-trim-keyframe-render test-seek-preview test-mpris test-mpris-art test-queue-model test-queue-view install uninstall FORCE
 
 all: $(TARGET) $(CONFIG) $(INPUT_CONFIG) $(LOCALE_RESOURCE) $(TRIM_CONFIG) $(STOCK_LIB) $(STOCK_ENGINE) $(STOCK_DATA)
 
@@ -243,7 +245,23 @@ test-mpris-art: $(MPRIS_ART_TEST)
 	if [ "$$status" -eq 77 ]; then printf '%s\n' 'MPRIS artwork check skipped (FFmpeg unavailable).'; \
 	elif [ "$$status" -ne 0 ]; then exit "$$status"; fi
 
-test: test-mpris test-mpris-art test-trim-titles test-trim-keyframes test-trim-keyframe-render
+$(QUEUE_MODEL_TEST): tests/queue_model.c src/queue_model.c src/queue_model.h $(STOCK_LIB) | build
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -Isrc -o "$@" tests/queue_model.c src/queue_model.c $(shell $(PKG_CONFIG) --libs gio-2.0 mpv) -lm
+
+test-queue-model: $(QUEUE_MODEL_TEST)
+	@./$(QUEUE_MODEL_TEST); status=$$?; \
+	if [ "$$status" -eq 77 ]; then printf '%s\n' 'Queue editor check skipped (FFmpeg tools unavailable).'; \
+	elif [ "$$status" -ne 0 ]; then exit "$$status"; fi
+
+$(QUEUE_VIEW_TEST): tests/queue_view.c tests/queue_model.c src/queue_view.c src/queue_view.h src/queue_model.c src/queue_model.h src/i18n.c src/i18n.h $(STOCK_LIB) | build $(LOCALE_RESOURCE)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -Isrc -o "$@" tests/queue_view.c src/queue_view.c src/queue_model.c src/i18n.c $(LDLIBS)
+
+test-queue-view: $(QUEUE_VIEW_TEST)
+	@./$(QUEUE_VIEW_TEST); status=$$?; \
+	if [ "$$status" -eq 77 ]; then printf '%s\n' 'Queue GTK check skipped (no usable Wayland display).'; \
+	elif [ "$$status" -ne 0 ]; then exit "$$status"; fi
+
+test: test-queue-model test-queue-view test-mpris test-mpris-art test-trim-titles test-trim-keyframes test-trim-keyframe-render
 
 test-trim: all test-trim-native test-trim-titles test-trim-keyframes test-trim-keyframe-render
 	@MPV_GTK_BINARY="$(abspath $(TARGET))" python3 tests/trim.py; \
@@ -369,6 +387,7 @@ uninstall:
 	fi
 
 clean:
+	rm -f "$(QUEUE_MODEL_TEST)" "$(QUEUE_VIEW_TEST)"
 	rm -f "$(SEEK_PREVIEW_TEST)"
 	rm -f "$(TRIM_NATIVE_TEST)" "$(TRIM_TITLES_TEST)"
 	rm -f "$(TRIM_KEYFRAME_TEST)"

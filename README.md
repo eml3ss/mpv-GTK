@@ -5,7 +5,8 @@ Video and controls share one window, and the interface stays responsive
 independently of the video's frame rate.
 
 - Open local files and URLs, or drag files into the player.
-- Manage playlists, chapters, audio tracks, subtitles, and playback speed.
+- Edit the [queue](docs/queue.md) with search, drag reordering, sorting, shuffle, and repeat.
+- Select chapters, audio tracks, subtitles, and playback speed.
 - Configure playback and mpv keybindings from the settings window.
 - Switch to [Trim Mode](docs/trim-mode.md) for lossless video cuts.
 - Preview local video frames on [timeline hover](docs/timeline-previews.md).

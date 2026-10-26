@@ -8,8 +8,8 @@ from unfinished interface work. Item 16 is tentative.
 
 - [x] Display the queue, select entries, and navigate between files.
 - [x] Add files through opening or drag and drop; configure automatic playlists.
-- [ ] Reorder entries by dragging, remove selected entries, and clear the queue.
-- [ ] Add search, sorting, shuffle, and repeat controls for the whole queue.
+- [x] Reorder entries by dragging, remove selected entries, and clear the queue.
+- [x] Add search, sorting, shuffle, and repeat controls for the whole queue.
 
 ## 2. Saved playlists and sessions
 

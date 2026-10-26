@@ -102,6 +102,8 @@ static void check_queue_widgets(Player *p)
     g_assert_true(gtk_widget_get_visible(p->error_bar));
     g_assert_cmpstr(gtk_label_get_text(GTK_LABEL(p->error_label)), ==, context_error->message);
     g_object_unref(root);
+    queue_model_free(p->queue_model);
+    p->queue_model = NULL;
     p->sidebar = p->previous_button = p->next_button = NULL;
     p->area = NULL;
     p->error_bar = p->error_label = NULL;

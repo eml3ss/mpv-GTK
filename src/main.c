@@ -37,9 +37,11 @@
 #include "mpris.h"
 #include "mpris_art.h"
 #include "audio_scrub.h"
+#include "queue_model.h"
+#include "queue_view.h"
 
 #define APP_ID "io.github.emless.mpvgtk"
-#define APP_VERSION "0.21.10"
+#define APP_VERSION "0.22.0"
 #define APP_ICON_NAME APP_ID
 #define HWDEC_REFRESH_ID UINT64_C(10001)
 #define HWDEC_SET_ID UINT64_C(10002)
@@ -188,6 +190,8 @@ typedef struct {
     Mpris *mpris;
     MprisArt *mpris_art;
     AudioScrub *audio_scrub;
+    QueueModel *queue_model;
+    QueueView *queue_view;
     guint scrub_release_source;
     guint mpris_source;
     GtkWidget *previous_button, *next_button, *chapter_button;
@@ -935,93 +939,59 @@ static gint64 node_int(const mpv_node *node, const char *key, gint64 fallback)
     return field && field->format == MPV_FORMAT_INT64 ? field->u.int64 : fallback;
 }
 
-static void playlist_activated(GtkListBox *list, GtkListBoxRow *row, gpointer data)
+static void queue_model_changed(gpointer data)
 {
-    (void)list;
     Player *p = data;
-    if (!p->mpv || p->closing || p->quit_requested)
-        return;
-    gint64 position = gtk_list_box_row_get_index(row);
-    int result = mpv_set_property_async(p->mpv, 0, "playlist-pos", MPV_FORMAT_INT64,
-                                        &position);
-    if (result < 0)
-        show_error(p, mpv_error_string(result));
-    set_flag(p, "pause", FALSE);
+    if (p->queue_view && !p->closing && !p->quit_requested)
+        queue_view_refresh(p->queue_view);
+}
+
+static void queue_model_error(const char *message, gpointer data)
+{
+    Player *p = data;
+    if (!p->closing && !p->quit_requested)
+        show_error(p, message);
 }
 
 static void update_playlist(Player *p, mpv_node *node)
 {
-    if (!p->playlist || !p->playlist_observed)
-        return;
-    GtkWidget *child;
-    while ((child = gtk_widget_get_first_child(p->playlist)))
-        gtk_list_box_remove(GTK_LIST_BOX(p->playlist), child);
-    if (!node || node->format != MPV_FORMAT_NODE_ARRAY)
-        return;
-    int count = node->u.list->num;
-    for (int i = 0; i < count; ++i) {
-        const mpv_node *entry = &node->u.list->values[i];
-        const char *title = node_string(entry, "title");
-        g_autofree char *fallback = NULL;
-        if (!*title) {
-            g_autoptr(GFile) file = g_file_new_for_commandline_arg(node_string(entry, "filename"));
-            fallback = g_file_get_basename(file);
-            title = fallback ? fallback : tr("Медиафайл");
-        }
-        g_autofree char *text = g_strdup_printf("%02d  %s", i + 1, title);
-        GtkWidget *label = gtk_label_new(text);
-        gtk_label_set_xalign(GTK_LABEL(label), 0);
-        gtk_label_set_ellipsize(GTK_LABEL(label), PANGO_ELLIPSIZE_END);
-        gtk_widget_set_tooltip_text(label, title);
-        gtk_widget_set_margin_top(label, 10);
-        gtk_widget_set_margin_bottom(label, 10);
-        gtk_widget_set_margin_start(label, 12);
-        gtk_widget_set_margin_end(label, 12);
-        gtk_list_box_append(GTK_LIST_BOX(p->playlist), label);
+    if (p->queue_model && p->playlist_observed)
+        queue_model_update(p->queue_model, node);
+}
+
+static void release_queue_view(Player *p)
+{
+    QueueView *view = p->queue_view;
+    p->queue_view = NULL;
+    p->playlist = p->queue_label = NULL;
+    if (view) {
+        gtk_revealer_set_child(GTK_REVEALER(p->sidebar), NULL);
+        queue_view_free(view);
     }
-    GtkListBoxRow *row = gtk_list_box_get_row_at_index(GTK_LIST_BOX(p->playlist),
-                                                     (int)p->playlist_position);
-    if (row)
-        gtk_list_box_select_row(GTK_LIST_BOX(p->playlist), row);
-    g_autofree char *label = g_strdup_printf(tr("Очередь · %d"), count);
-    gtk_label_set_text(GTK_LABEL(p->queue_label), label);
 }
 
 static void queue_reveal_changed(GObject *object, GParamSpec *spec, gpointer data)
 {
-    (void)object;
-    (void)spec;
+    (void)object; (void)spec;
     Player *p = data;
+    if (p->close_prepared || p->closing || p->quit_requested)
+        return;
     gboolean visible = gtk_revealer_get_reveal_child(GTK_REVEALER(p->sidebar));
-    if (visible && !p->playlist) {
-        GtkWidget *sidebox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
-        gtk_widget_add_css_class(sidebox, "queue");
-        gtk_widget_set_size_request(sidebox, 260, -1);
-        p->queue_label = translated_label("Очередь · 0");
-        g_autofree char *count = g_strdup_printf(tr("Очередь · %d"), (int)p->playlist_count);
-        gtk_label_set_text(GTK_LABEL(p->queue_label), count);
-        gtk_widget_add_css_class(p->queue_label, "heading");
-        gtk_widget_set_margin_top(p->queue_label, 16);
-        gtk_widget_set_margin_bottom(p->queue_label, 16);
-        gtk_box_append(GTK_BOX(sidebox), p->queue_label);
-        GtkWidget *scroller = gtk_scrolled_window_new();
-        gtk_widget_set_vexpand(scroller, TRUE);
-        gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scroller), GTK_POLICY_NEVER,
-                                        GTK_POLICY_AUTOMATIC);
-        p->playlist = gtk_list_box_new();
-        gtk_list_box_set_selection_mode(GTK_LIST_BOX(p->playlist), GTK_SELECTION_SINGLE);
-        g_signal_connect(p->playlist, "row-activated", G_CALLBACK(playlist_activated), p);
-        gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scroller), p->playlist);
-        gtk_box_append(GTK_BOX(sidebox), scroller);
-        gtk_revealer_set_child(GTK_REVEALER(p->sidebar), sidebox);
+    if (visible && !p->queue_view && p->mpv) {
+        if (!p->queue_model)
+            p->queue_model = queue_model_new(p->mpv, queue_model_changed, queue_model_error, p);
+        p->queue_view = queue_view_new(p->queue_model);
+        p->playlist = queue_view_list(p->queue_view);
+        p->queue_label = queue_view_count_label(p->queue_view);
+        gtk_revealer_set_child(GTK_REVEALER(p->sidebar), queue_view_widget(p->queue_view));
     }
-    const ObservedProperty property = {"playlist", MPV_FORMAT_NODE};
-    observe_group(p, &property, 1, PLAYLIST_OBSERVE_ID, visible, &p->playlist_observed);
-    if (!visible && !gtk_revealer_get_child_revealed(GTK_REVEALER(p->sidebar)) && p->playlist) {
-        p->playlist = NULL;
-        p->queue_label = NULL;
-        gtk_revealer_set_child(GTK_REVEALER(p->sidebar), NULL);
-    }
+    const ObservedProperty properties[] = {
+        {"playlist", MPV_FORMAT_NODE}, {"loop-playlist", MPV_FORMAT_STRING}
+    };
+    observe_group(p, properties, G_N_ELEMENTS(properties), PLAYLIST_OBSERVE_ID,
+                  visible, &p->playlist_observed);
+    if (!visible && !gtk_revealer_get_child_revealed(GTK_REVEALER(p->sidebar)))
+        release_queue_view(p);
 }
 
 static void add_target_item(GMenu *menu, const char *label, const char *action,
@@ -1439,10 +1409,11 @@ static void property_changed(Player *p, mpv_event_property *property)
         update_track_menu(p, value);
     } else if (g_str_equal(name, "playlist-pos")) {
         p->playlist_position = *(int64_t *)value;
-        GtkListBoxRow *row = p->playlist ? gtk_list_box_get_row_at_index(
-            GTK_LIST_BOX(p->playlist), (int)p->playlist_position) : NULL;
-        if (row)
-            gtk_list_box_select_row(GTK_LIST_BOX(p->playlist), row);
+        if (p->queue_model)
+            queue_model_set_position(p->queue_model, p->playlist_position);
+    } else if (g_str_equal(name, "loop-playlist")) {
+        if (p->queue_model)
+            queue_model_update_repeat(p->queue_model, *(char **)value);
     } else if (g_str_equal(name, "playlist-count")) {
         p->playlist_count = *(int64_t *)value;
         update_playlist_navigation(p);
@@ -1494,6 +1465,7 @@ static void property_changed(Player *p, mpv_event_property *property)
 
 static void handle_event(Player *p, mpv_event *event)
 {
+    if (queue_model_handle_event(p->queue_model, event)) return;
     if (audio_scrub_handle_event(p->audio_scrub, event)) return;
     /* Once hidden, only drain lifecycle events and the render queue. Late
      * snapshots/command replies must not reopen UI or schedule more work. */
@@ -2561,15 +2533,14 @@ static gboolean language_changed_idle(gpointer data)
     translate_tree(p->root);
     translate_tree(p->header);
     trim_mode_translate(p->trim);
+    if (p->queue_view)
+        queue_view_translate(p->queue_view);
     update_app_menu(p);
     if (p->url_dialog) {
         gtk_window_set_title(p->url_dialog, tr("Открыть ссылку"));
         translate_tree(GTK_WIDGET(p->url_dialog));
     }
     update_transport(p);
-    g_autofree char *queue = g_strdup_printf(tr("Очередь · %d"), (int)p->playlist_count);
-    if (p->queue_label)
-        gtk_label_set_text(GTK_LABEL(p->queue_label), queue);
     if (p->mpv)
         mpv_get_property_async(p->mpv, TRACK_REFRESH_ID, "track-list", MPV_FORMAT_NODE);
     if (p->mpv && p->playlist_observed)
@@ -3378,6 +3349,8 @@ static gboolean key_pressed(GtkEventControllerKey *controller, guint key,
     GtkWidget *focus = gtk_window_get_focus(p->window);
     if (focus && GTK_IS_EDITABLE(focus))
         return FALSE;
+    if (queue_view_wants_key(p->queue_view, focus, key, state))
+        return FALSE;
     g_autofree char *input_key = input_key_name(key, state);
     if (!input_key)
         return FALSE;
@@ -3535,6 +3508,9 @@ static void prepare_close(Player *p)
     if (display)
         gdk_display_flush(display);
     startup_trace_mark("windows hidden and flushed");
+    release_queue_view(p);
+    queue_model_free(p->queue_model);
+    p->queue_model = NULL;
     mpris_art_free(p->mpris_art);
     p->mpris_art = NULL;
     mpris_free(p->mpris);
@@ -4371,6 +4347,15 @@ static void activate(GtkApplication *application, gpointer data)
         ".queue { background: @view_bg_color; color: @view_fg_color;"
         "border-left: 1px solid alpha(@window_fg_color,.08); }"
         ".queue list { background: transparent; }"
+        ".queue-rows > row { padding: 0; border-radius: 7px; margin: 2px 6px; }"
+        ".queue-entry.queue-current .queue-entry-title, .queue-current .queue-index { color: @accent_color; }"
+        ".queue-index { font-variant-numeric: tabular-nums; }"
+        ".queue-entry.drop-before { box-shadow: inset 0 2px @accent_bg_color; }"
+        ".queue-entry.drop-after { box-shadow: inset 0 -2px @accent_bg_color; }"
+        ".queue-editor button.queue-action { min-width: 24px; min-height: 24px;"
+        "padding: 4px 8px; border-radius: 7px; }"
+        ".queue-editor .queue-sort > button { min-height: 24px; padding: 4px 8px; border-radius: 7px; }"
+        ".queue-editor button.queue-action:checked { color: @accent_color; background: alpha(@accent_bg_color,.14); }"
         ".error-bar { background: @error_bg_color; color: @error_fg_color; padding: 8px 12px; }"
         ".controls scale.seek-scale { padding: 12px; }"
         ".controls scale.seek-scale trough { min-height: 4px; background: alpha(@window_fg_color,.13); border: none; }"
@@ -4575,6 +4560,9 @@ int main(int argc, char **argv)
     int status = g_application_run(G_APPLICATION(p.application), 1, argv);
     startup_trace_mark("GTK application loop finished");
     p.closing = TRUE;
+    release_queue_view(&p);
+    queue_model_free(p.queue_model);
+    p.queue_model = NULL;
     if (p.scrub_release_source) g_source_remove(p.scrub_release_source);
     audio_scrub_free(p.audio_scrub);
     p.audio_scrub = NULL;
