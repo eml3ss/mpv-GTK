@@ -21,7 +21,8 @@ typedef struct {
     PreferenceValues values;
     GtkSwitch *keepaspect, *deinterlace, *deband, *loop;
     GtkSwitch *allow_replace, *add_to_queue, *timeline_previews;
-    GtkDropDown *autocreate_playlist, *directory_mode, *queue_sort;
+    GtkDropDown *autocreate_playlist, *directory_mode, *queue_sort, *hr_seek;
+    GtkLabel *hr_seek_description;
     GPtrArray *autocreate_values, *directory_values;
     GtkLabel *autocreate_description, *directory_description;
     GtkEntry *directory_filter_types;
@@ -73,6 +74,7 @@ static const char *const hwdec_values[] = {
 };
 
 static const char *const gpu_api_values[] = {"auto", "opengl", "opengl-es"};
+static const char *const hr_seek_values[] = {"default", "no", "absolute", "yes"};
 static const char *const autocreate_options[] = {"no", "filter", "same"};
 static const char *const directory_options[] = {"auto", "lazy", "recursive", "ignore"};
 static const char *const extension_options[] = {
@@ -390,6 +392,7 @@ static void preferences_free(gpointer data)
     g_free((gpointer)p->values.gpu_api);
     g_free((gpointer)p->values.audio_output);
     g_free((gpointer)p->values.audio_device);
+    g_free((gpointer)p->values.hr_seek);
     g_free((gpointer)p->values.autocreate_playlist);
     g_free((gpointer)p->values.directory_mode);
     g_free((gpointer)p->values.directory_filter_types);
@@ -950,6 +953,38 @@ static void changed_queue_sort(GObject *object, GParamSpec *property, gpointer d
     p->on_change("ui-queue-sort", MPV_FORMAT_INT64, &mode, p->user_data);
 }
 
+static const char *hr_seek_hint(const char *value)
+{
+    if (!value)
+        return tr("Загрузка настроек…");
+    if (g_str_equal(value, "default"))
+        return tr("Точная перемотка к указанному времени и главам, а также в аудиофайлах. Относительные переходы видео идут по ключевым кадрам. Команды с явной точностью имеют приоритет.");
+    if (g_str_equal(value, "no"))
+        return tr("Перемотка по ключевым кадрам. Команды с явной точностью имеют приоритет.");
+    if (g_str_equal(value, "absolute"))
+        return tr("Точная перемотка к указанному времени и главам. Относительные переходы идут по ключевым кадрам. Команды с явной точностью имеют приоритет.");
+    if (g_str_equal(value, "yes") || g_str_equal(value, "always"))
+        return tr("Точная перемотка при любой возможности. Может быть медленнее из-за декодирования от предыдущего ключевого кадра. Команды с явной точностью имеют приоритет.");
+    return tr("Текущий режим задан в mpv.conf.");
+}
+
+static void changed_hr_seek(GObject *object, GParamSpec *property, gpointer data)
+{
+    (void)property;
+    Preferences *p = data;
+    guint selected = gtk_drop_down_get_selected(GTK_DROP_DOWN(object));
+    if (p->updating || !p->on_change || !p->values.hr_seek ||
+        selected >= G_N_ELEMENTS(hr_seek_values))
+        return;
+    const char *value = hr_seek_values[selected];
+    const char *current = g_str_equal(p->values.hr_seek, "always")
+                        ? "yes" : p->values.hr_seek;
+    if (g_str_equal(value, current))
+        return;
+    gtk_label_set_text(p->hr_seek_description, hr_seek_hint(value));
+    p->on_change("hr-seek", MPV_FORMAT_STRING, &value, p->user_data);
+}
+
 static void changed_gpu_api(GObject *object, GParamSpec *property, gpointer data)
 {
     (void)property;
@@ -1169,6 +1204,21 @@ static void refresh_controls(Preferences *p, const char *section)
     if (p->loop && (!section || g_str_equal(section, "playback")))
         gtk_switch_set_active(p->loop, values->loop);
     if (!section || g_str_equal(section, "playback")) {
+        if (p->hr_seek) {
+            const char *value = g_strcmp0(values->hr_seek, "always") == 0
+                              ? "yes" : values->hr_seek;
+            guint mode = GTK_INVALID_LIST_POSITION;
+            for (guint i = 0; i < G_N_ELEMENTS(hr_seek_values); ++i) {
+                if (g_strcmp0(value, hr_seek_values[i]) == 0) {
+                    mode = i;
+                    break;
+                }
+            }
+            gtk_drop_down_set_selected(p->hr_seek, mode);
+            gtk_widget_set_sensitive(GTK_WIDGET(p->hr_seek),
+                mode != GTK_INVALID_LIST_POSITION && p->on_change);
+            gtk_label_set_text(p->hr_seek_description, hr_seek_hint(values->hr_seek));
+        }
         if (p->queue_sort) {
             int mode = values->queue_sort >= -1 && values->queue_sort <= 7
                      ? values->queue_sort : -1;
@@ -1225,6 +1275,7 @@ void preferences_window_update(GtkWindow *window, const PreferenceValues *values
     snapshot.gpu_api = g_strdup(values->gpu_api);
     snapshot.audio_output = g_strdup(values->audio_output);
     snapshot.audio_device = g_strdup(values->audio_device);
+    snapshot.hr_seek = g_strdup(values->hr_seek);
     snapshot.autocreate_playlist = g_strdup(values->autocreate_playlist);
     snapshot.directory_mode = g_strdup(values->directory_mode);
     snapshot.directory_filter_types = g_strdup(values->directory_filter_types);
@@ -1239,6 +1290,7 @@ void preferences_window_update(GtkWindow *window, const PreferenceValues *values
     g_free((gpointer)p->values.gpu_api);
     g_free((gpointer)p->values.audio_output);
     g_free((gpointer)p->values.audio_device);
+    g_free((gpointer)p->values.hr_seek);
     g_free((gpointer)p->values.autocreate_playlist);
     g_free((gpointer)p->values.directory_mode);
     g_free((gpointer)p->values.directory_filter_types);
@@ -1480,6 +1532,19 @@ static void build_playback(Preferences *p)
     GtkWidget *playback = page(p->sections[3], tr("Воспроизведение"));
     p->loop = add_switch(p, playback, "loop-file", tr("Повторять текущий файл"),
         tr("После окончания начинает текущий файл заново."));
+    const char *hr_seek_labels[] = {
+        tr("По умолчанию"), tr("Отключено"), tr("Только абсолютная"), tr("Всегда"), NULL
+    };
+    p->hr_seek = GTK_DROP_DOWN(gtk_drop_down_new_from_strings(hr_seek_labels));
+    GtkWidget *hr_labels = row(playback, tr("Точная перемотка (hr-seek)"), NULL,
+        GTK_WIDGET(p->hr_seek));
+    p->hr_seek_description = GTK_LABEL(gtk_label_new(NULL));
+    gtk_label_set_xalign(p->hr_seek_description, 0);
+    gtk_label_set_wrap(p->hr_seek_description, TRUE);
+    gtk_label_set_max_width_chars(p->hr_seek_description, 40);
+    gtk_widget_add_css_class(GTK_WIDGET(p->hr_seek_description), "dim-label");
+    gtk_box_append(GTK_BOX(hr_labels), GTK_WIDGET(p->hr_seek_description));
+    g_signal_connect(p->hr_seek, "notify::selected", G_CALLBACK(changed_hr_seek), p);
     const char *sort_labels[] = {
         tr("Не изменять порядок"),
         tr("Название: А–Я"), tr("Название: Я–А"),

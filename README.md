@@ -6,7 +6,7 @@ independently of the video's frame rate.
 
 - Open local files and URLs, or drag files into the player.
 - Edit the [queue](docs/queue.md) with search, drag reordering, sorting, shuffle, and repeat.
-- Select chapters, audio tracks, subtitles, and playback speed.
+- Select chapters, attach [external audio and subtitles](docs/external-tracks.md), and adjust playback speed.
 - Configure playback and mpv keybindings from the settings window.
 - Switch to [Trim Mode](docs/trim-mode.md) for lossless video cuts.
 - Preview local video frames on [timeline hover](docs/timeline-previews.md).

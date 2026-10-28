@@ -41,7 +41,7 @@
 #include "queue_view.h"
 
 #define APP_ID "io.github.emless.mpvgtk"
-#define APP_VERSION "0.22.7"
+#define APP_VERSION "0.23.0"
 #define APP_ICON_NAME APP_ID
 #define HWDEC_REFRESH_ID UINT64_C(10001)
 #define HWDEC_SET_ID UINT64_C(10002)
@@ -61,6 +61,8 @@
 #define CHAPTER_CURRENT_REFRESH_BASE (UINT64_C(1) << 33)
 #define INITIAL_SUBTITLE_REFRESH_BASE (UINT64_C(1) << 34)
 #define TRACK_NOTICE_REFRESH_BASE (UINT64_C(1) << 35)
+#define TRACK_ADD_BASE (UINT64_C(1) << 36)
+#define TRACK_ADD_LIMIT (UINT64_C(1) << 37)
 #define PREFERENCES_OBSERVE_BASE UINT64_C(20000)
 #define DECODER_OBSERVE_BASE UINT64_C(20100)
 #define PLAYLIST_OBSERVE_ID UINT64_C(20200)
@@ -124,7 +126,8 @@ static const ObservedProperty preferences_properties[] = {
     {"keepaspect", MPV_FORMAT_FLAG},
     {"deinterlace", MPV_FORMAT_FLAG}, {"deband", MPV_FORMAT_FLAG},
     {"loop-file", MPV_FORMAT_STRING}, {"audio-delay", MPV_FORMAT_DOUBLE},
-    {"sub-delay", MPV_FORMAT_DOUBLE}, {"sub-scale", MPV_FORMAT_DOUBLE}
+    {"sub-delay", MPV_FORMAT_DOUBLE}, {"sub-scale", MPV_FORMAT_DOUBLE},
+    {"hr-seek", MPV_FORMAT_STRING}
 };
 
 static const ObservedProperty decoder_properties[] = {
@@ -176,6 +179,13 @@ typedef struct {
     gboolean priming;
 } TrackNoticeWatch;
 
+typedef enum { FILE_OPEN_MEDIA, FILE_ADD_AUDIO, FILE_ADD_SUBTITLE } FilePurpose;
+
+typedef struct {
+    char *path;
+    gboolean audio;
+} TrackAddition;
+
 typedef struct {
     GtkApplication *application;
     GtkWindow *window;
@@ -184,6 +194,7 @@ typedef struct {
     gboolean default_gsk_renderer;
     const char *active_vo, *gl_api, *pending_gpu_api;
     GtkWidget *header, *controls, *empty, *error_bar, *error_label;
+    char *startup_error;
     GtkWidget *title, *time_label, *play_button, *play_icon, *mute_button, *root;
     TrimMode *trim;
     SeekPreview *seek_preview;
@@ -208,6 +219,11 @@ typedef struct {
     GtkWidget *app_menu_button;
     GtkFileDialog *chooser;
     GCancellable *file_cancel;
+    FilePurpose file_purpose;
+    uint64_t media_generation, chooser_generation;
+    GQueue track_additions;
+    TrackAddition *track_addition;
+    uint64_t track_add_request, track_add_serial;
     GtkWindow *url_dialog, *preferences, *info_window, *about_window;
     GCancellable *config_launch_cancel;
     GMenu *audio_menu, *subtitle_menu, *speed_menu, *app_menu;
@@ -215,7 +231,7 @@ typedef struct {
     PreferenceValues preference_values;
     char *hwdec, *hwdec_current, *pending_hwdec;
     gboolean cuda_interop;
-    char *audio_output, *audio_device;
+    char *audio_output, *audio_device, *hr_seek;
     char *initial_subtitle;
     char *playlist_values[G_N_ELEMENTS(playlist_preference_properties)];
     ControlsVisibility controls_state;
@@ -272,6 +288,7 @@ typedef struct {
 static gboolean open_paths(Player *p, GPtrArray *paths);
 static void flush_pending_paths(Player *p);
 static void show_files(Player *p);
+static void show_track_files(Player *p, gboolean audio);
 static void show_url(Player *p);
 static void update_transport(Player *p);
 static void update_track_menu(Player *p, mpv_node *node);
@@ -299,6 +316,11 @@ static void hide_track_notice(Player *p);
 static void request_track_notice(Player *p, gboolean audio, gboolean silent);
 static gboolean start_mpris_idle(gpointer data);
 static void clamp_queue_width(Player *p);
+
+static const char *const subtitle_extensions[] = {
+    "ass", "idx", "lrc", "mks", "pgs", "rt", "sbv", "scc", "smi", "srt",
+    "ssa", "sub", "sup", "utf", "utf-8", "utf8", "vtt"
+};
 
 static GtkWidget *player_video_widget(Player *p)
 {
@@ -446,6 +468,9 @@ static void show_error(Player *p, const char *message)
         gtk_label_set_text(GTK_LABEL(p->error_label), message);
         gtk_widget_set_visible(p->error_bar, TRUE);
         present_startup_window(p);
+    } else if (!p->closing && !p->quit_requested) {
+        g_free(p->startup_error);
+        p->startup_error = g_strdup(message);
     }
 }
 
@@ -472,6 +497,92 @@ static void command(Player *p, const char *args[])
     int result = mpv_command_async(p->mpv, 0, args);
     if (result < 0)
         show_error(p, mpv_error_string(result));
+}
+
+static void track_addition_free(gpointer data)
+{
+    TrackAddition *addition = data;
+    if (!addition) return;
+    g_free(addition->path);
+    g_free(addition);
+}
+
+static void cancel_track_additions(Player *p)
+{
+    if (p->track_add_request && p->mpv)
+        mpv_abort_async_command(p->mpv, p->track_add_request);
+    p->track_add_request = 0;
+    g_clear_pointer(&p->track_addition, track_addition_free);
+    g_queue_clear_full(&p->track_additions, track_addition_free);
+}
+
+static void start_track_addition(Player *p)
+{
+    while (!p->track_add_request && p->mpv && p->timeline.loaded &&
+           !p->media_loading && !p->closing && !p->quit_requested &&
+           !g_queue_is_empty(&p->track_additions)) {
+        p->track_addition = g_queue_pop_head(&p->track_additions);
+        const char *args[] = {p->track_addition->audio ? "audio-add" : "sub-add",
+                             p->track_addition->path, "cached", NULL};
+        p->track_add_request = TRACK_ADD_BASE + ++p->track_add_serial;
+        int result = mpv_command_async(p->mpv, p->track_add_request, args);
+        if (result >= 0) return;
+        show_error(p, mpv_error_string(result));
+        p->track_add_request = 0;
+        g_clear_pointer(&p->track_addition, track_addition_free);
+    }
+}
+
+static gboolean vobsub_companion_in_batch(const char *path, GPtrArray *paths)
+{
+    g_autoptr(GFile) file = g_file_new_for_commandline_arg(path);
+    g_autofree char *name = g_file_get_basename(file);
+    const char *dot = name ? strrchr(name, '.') : NULL;
+    if (!dot || g_ascii_strcasecmp(dot, ".sub") != 0) return FALSE;
+    gsize stem_length = dot - name;
+    g_autoptr(GFile) parent = g_file_get_parent(file);
+    if (!parent) return FALSE;
+    for (guint i = 0; i < paths->len; ++i) {
+        g_autoptr(GFile) candidate = g_file_new_for_commandline_arg(g_ptr_array_index(paths, i));
+        g_autofree char *candidate_name = g_file_get_basename(candidate);
+        if (!candidate_name || strlen(candidate_name) != stem_length + 4 ||
+            strncmp(candidate_name, name, stem_length) != 0 ||
+            g_ascii_strcasecmp(candidate_name + stem_length, ".idx") != 0)
+            continue;
+        g_autoptr(GFile) candidate_parent = g_file_get_parent(candidate);
+        if (candidate_parent && g_file_equal(parent, candidate_parent)) return TRUE;
+    }
+    return FALSE;
+}
+
+static gboolean add_external_tracks(Player *p, GPtrArray *paths, gboolean audio)
+{
+    if (!p->mpv || !p->timeline.loaded || p->media_loading ||
+        p->closing || p->quit_requested)
+        return FALSE;
+    for (guint i = 0; i < paths->len; ++i) {
+        const char *path = g_ptr_array_index(paths, i);
+        /* VobSub's index loads its paired binary file itself. A standalone
+         * .sub remains valid, including text-based subtitle formats. */
+        if (!audio && vobsub_companion_in_batch(path, paths)) continue;
+        TrackAddition *addition = g_new0(TrackAddition, 1);
+        addition->path = g_strdup(path);
+        addition->audio = audio;
+        g_queue_push_tail(&p->track_additions, addition);
+    }
+    start_track_addition(p);
+    return paths->len > 0;
+}
+
+static gboolean is_subtitle_path(const char *path)
+{
+    g_autoptr(GFile) file = g_file_new_for_commandline_arg(path);
+    g_autofree char *basename = g_file_get_basename(file);
+    const char *dot = basename ? strrchr(basename, '.') : NULL;
+    if (!dot) return FALSE;
+    for (guint i = 0; i < G_N_ELEMENTS(subtitle_extensions); ++i)
+        if (g_ascii_strcasecmp(dot + 1, subtitle_extensions[i]) == 0) return TRUE;
+    return FALSE;
 }
 
 static void clear_chapters(Player *p)
@@ -1104,14 +1215,26 @@ static void update_track_menu(Player *p, mpv_node *node)
             const char *title = node_string(track, "title");
             const char *lang = node_string(track, "lang");
             const char *codec = node_string(track, "codec");
-            g_autofree char *label = g_strdup_printf("%" G_GINT64_FORMAT " · %s%s%s%s%s",
-                id, *title ? title : (*lang ? lang : tr("Дорожка")),
-                *title && *lang ? " · " : "", *title && *lang ? lang : "",
-                *codec ? " · " : "", codec);
+            const char *external = node_string(track, "external-filename");
+            g_autoptr(GFile) external_file = *external
+                ? g_file_new_for_commandline_arg(external) : NULL;
+            g_autofree char *basename = external_file ? g_file_get_basename(external_file) : NULL;
+            g_autofree char *label = g_strdup_printf("%" G_GINT64_FORMAT " · %s%s%s%s%s%s%s",
+                id, *title ? title : (basename ? basename : (*lang ? lang : tr("Дорожка"))),
+                (*title || basename) && *lang ? " · " : "",
+                (*title || basename) && *lang ? lang : "",
+                *codec ? " · " : "", codec,
+                *external ? " · " : "", *external ? tr("Внешняя дорожка") : "");
             add_target_item(menu, label, g_str_equal(type, "audio")
                             ? "app.audio" : "app.subtitle", target);
         }
     }
+    g_autoptr(GMenu) audio_actions = g_menu_new();
+    g_menu_append(audio_actions, tr("Добавить аудиодорожку…"), "app.audio-add");
+    g_menu_append_section(p->audio_menu, NULL, G_MENU_MODEL(audio_actions));
+    g_autoptr(GMenu) subtitle_actions = g_menu_new();
+    g_menu_append(subtitle_actions, tr("Добавить субтитры…"), "app.subtitle-add");
+    g_menu_append_section(p->subtitle_menu, NULL, G_MENU_MODEL(subtitle_actions));
 }
 
 static char *track_notice_text(Player *p, gboolean audio, const char *id)
@@ -1278,6 +1401,12 @@ static void update_transport(Player *p)
     if (p->quit_requested)
         return;
     update_playlist_navigation(p);
+    const char *track_actions[] = {"audio-add", "subtitle-add"};
+    for (guint i = 0; p->application && i < G_N_ELEMENTS(track_actions); ++i) {
+        GAction *action = g_action_map_lookup_action(G_ACTION_MAP(p->application), track_actions[i]);
+        if (action) g_simple_action_set_enabled(G_SIMPLE_ACTION(action),
+            p->timeline.loaded && !p->media_loading);
+    }
     transport_icon_set(p->play_icon, p->timeline.paused || !p->timeline.loaded
                         ? TRANSPORT_PLAY : TRANSPORT_PAUSE);
     gtk_widget_set_tooltip_text(p->play_button,
@@ -1378,8 +1507,15 @@ static void property_changed(Player *p, mpv_event_property *property)
         g_str_equal(name, "deband") || g_str_equal(name, "loop-file") ||
         g_str_equal(name, "audio-delay") || g_str_equal(name, "sub-delay") ||
         g_str_equal(name, "sub-scale") || g_str_equal(name, "vid") ||
-        g_str_equal(name, "ao") || g_str_equal(name, "audio-device");
+        g_str_equal(name, "ao") || g_str_equal(name, "audio-device") ||
+        g_str_equal(name, "hr-seek");
     if (!value || property->format == MPV_FORMAT_NONE) {
+        if (g_str_equal(name, "hr-seek")) {
+            g_clear_pointer(&p->hr_seek, g_free);
+            p->preference_values.hr_seek = NULL;
+            if (p->preferences)
+                preferences_window_update(p->preferences, &p->preference_values);
+        }
         if (g_str_equal(name, "duration")) {
             p->timeline.duration = 0;
             if (p->seek_overlay)
@@ -1411,6 +1547,10 @@ static void property_changed(Player *p, mpv_event_property *property)
         g_free(p->audio_device);
         p->audio_device = g_strdup(*(char **)value);
         p->preference_values.audio_device = p->audio_device;
+    } else if (g_str_equal(name, "hr-seek")) {
+        g_free(p->hr_seek);
+        p->hr_seek = g_strdup(*(char **)value);
+        p->preference_values.hr_seek = p->hr_seek;
     } else if (g_str_equal(name, "time-pos")) {
         double position = *(double *)value;
         if (!isfinite(position))
@@ -1578,6 +1718,8 @@ static void handle_event(Player *p, mpv_event *event)
         property_changed(p, event->data);
         break;
     case MPV_EVENT_START_FILE:
+        ++p->media_generation;
+        cancel_track_additions(p);
         p->media_loading = TRUE;
         p->idle = FALSE;
         p->timeline.loaded = FALSE;
@@ -1634,6 +1776,8 @@ static void handle_event(Player *p, mpv_event *event)
         }
         break;
     case MPV_EVENT_END_FILE: {
+        ++p->media_generation;
+        cancel_track_additions(p);
         p->media_loading = FALSE;
         mpv_event_end_file *end = event->data;
         if (end->reason == MPV_END_FILE_REASON_QUIT) {
@@ -1757,6 +1901,20 @@ static void handle_event(Player *p, mpv_event *event)
         break;
     case MPV_EVENT_COMMAND_REPLY:
     case MPV_EVENT_SET_PROPERTY_REPLY:
+        if (event->reply_userdata >= TRACK_ADD_BASE && event->reply_userdata < TRACK_ADD_LIMIT) {
+            if (p->track_add_request == event->reply_userdata) {
+                if (event->error < 0 && p->timeline.loaded && !p->media_loading) {
+                    g_autofree char *message = g_strdup_printf(
+                        tr("Не удалось добавить дорожку «%s»: %s"),
+                        p->track_addition->path, mpv_error_string(event->error));
+                    show_error(p, message);
+                }
+                p->track_add_request = 0;
+                g_clear_pointer(&p->track_addition, track_addition_free);
+                start_track_addition(p);
+            }
+            break;
+        }
         if (event->reply_userdata == INPUT_RELOAD_CLEAR_ID && event->error < 0 && p->preferences)
             preferences_window_keys_error(p->preferences, mpv_error_string(event->error));
         if (event->reply_userdata == INPUT_RELOAD_FILE_ID) {
@@ -2155,27 +2313,70 @@ static void flush_pending_paths(Player *p)
 
 /* The preloaded hook holds VO/decoder setup until GtkGLArea is ready. File
  * opening and demuxing can already run while GTK prepares that context. */
+static void load_media_file(Player *p, const char *path, const char *mode,
+                            GPtrArray *subtitles)
+{
+    if (!subtitles || !subtitles->len) {
+        const char *args[] = {"loadfile", path, mode, NULL};
+        command(p, args);
+        return;
+    }
+    /* Native key/value options preserve repeated append keys. Each filename
+     * stays opaque, including commas, colons and backslashes. The options
+     * belong to this playlist entry, including when it is queued for later. */
+    g_autofree char **keys = g_new0(char *, subtitles->len);
+    g_autofree mpv_node *values = g_new0(mpv_node, subtitles->len);
+    for (guint i = 0; i < subtitles->len; ++i) {
+        keys[i] = "sub-files-append";
+        values[i] = (mpv_node){.format = MPV_FORMAT_STRING,
+                              .u.string = g_ptr_array_index(subtitles, i)};
+    }
+    mpv_node_list options = {.num = (int)subtitles->len, .keys = keys, .values = values};
+    mpv_node args[] = {
+        {.format = MPV_FORMAT_STRING, .u.string = "loadfile"},
+        {.format = MPV_FORMAT_STRING, .u.string = (char *)path},
+        {.format = MPV_FORMAT_STRING, .u.string = (char *)mode},
+        {.format = MPV_FORMAT_INT64, .u.int64 = -1},
+        {.format = MPV_FORMAT_NODE_MAP, .u.list = &options}
+    };
+    mpv_node_list list = {.num = G_N_ELEMENTS(args), .values = args};
+    mpv_node request = {.format = MPV_FORMAT_NODE_ARRAY, .u.list = &list};
+    int result = mpv_command_node_async(p->mpv, 0, &request);
+    if (result < 0) show_error(p, mpv_error_string(result));
+}
+
 static void queue_media_paths(Player *p, GPtrArray *paths, gboolean append)
 {
-    if (!append)
+    g_autoptr(GPtrArray) media = g_ptr_array_new();
+    g_autoptr(GPtrArray) subtitles = g_ptr_array_new();
+    for (guint i = 0; i < paths->len; ++i) {
+        char *path = g_ptr_array_index(paths, i);
+        if (vobsub_companion_in_batch(path, paths)) continue;
+        g_ptr_array_add(is_subtitle_path(path) ? subtitles : media, path);
+    }
+    if (!media->len) {
+        if (!add_external_tracks(p, subtitles, FALSE))
+            show_error(p, tr("Сначала откройте видео или аудиофайл."));
+        return;
+    }
+    if (!append) {
+        ++p->media_generation;
+        cancel_track_additions(p);
         p->media_loading = TRUE;
-    if (!append && paths->len > 1) {
+    }
+    if (!append && media->len > 1) {
         /* Build the explicit selection before playback starts, so native
          * autocreate-playlist cannot expand the first entry mid-batch. */
         const char *stop[] = {"stop", NULL};
         command(p, stop);
-        for (guint i = 0; i < paths->len; ++i) {
-            const char *args[] = {"loadfile", g_ptr_array_index(paths, i), "append", NULL};
-            command(p, args);
-        }
+        for (guint i = 0; i < media->len; ++i)
+            load_media_file(p, g_ptr_array_index(media, i), "append", i == 0 ? subtitles : NULL);
         const char *play[] = {"playlist-play-index", "0", NULL};
         command(p, play);
     } else {
-        for (guint i = 0; i < paths->len; ++i) {
-            const char *args[] = {"loadfile", g_ptr_array_index(paths, i),
-                                 append || i > 0 ? "append" : "replace", NULL};
-            command(p, args);
-        }
+        for (guint i = 0; i < media->len; ++i)
+            load_media_file(p, g_ptr_array_index(media, i),
+                            append || i > 0 ? "append" : "replace", i == 0 ? subtitles : NULL);
     }
     if (!append)
         set_flag(p, "pause", FALSE);
@@ -2197,6 +2398,20 @@ static gboolean open_paths(Player *p, GPtrArray *paths)
 {
     if (p->closing || p->quit_requested || !paths || !paths->len)
         return FALSE;
+    gboolean subtitles_only = TRUE;
+    for (guint i = 0; i < paths->len; ++i)
+        if (!is_subtitle_path(g_ptr_array_index(paths, i))) {
+            subtitles_only = FALSE;
+            break;
+        }
+    if (subtitles_only) {
+        if (!add_external_tracks(p, paths, FALSE)) {
+            show_error(p, tr("Сначала откройте видео или аудиофайл."));
+            return FALSE;
+        }
+        if (player_video_widget(p)) gtk_widget_grab_focus(player_video_widget(p));
+        return TRUE;
+    }
     gboolean current = p->timeline.loaded || p->media_loading ||
         (p->pending && p->pending->len > 0);
     gboolean append = current && i18n_add_to_queue();
@@ -2282,7 +2497,12 @@ static void file_response(GObject *source, GAsyncResult *result, gpointer data)
             g_autoptr(GFile) file = g_list_model_get_item(files, i);
             g_ptr_array_add(paths, media_location(file));
         }
-        open_paths(p, paths);
+        if (p->file_purpose == FILE_OPEN_MEDIA) {
+            open_paths(p, paths);
+        } else if (p->chooser_generation != p->media_generation ||
+                   !add_external_tracks(p, paths, p->file_purpose == FILE_ADD_AUDIO)) {
+            show_error(p, tr("Файл воспроизведения изменился. Добавьте дорожку заново."));
+        }
     } else if (error && !p->closing && !p->quit_requested &&
                !g_error_matches(error, GTK_DIALOG_ERROR, GTK_DIALOG_ERROR_DISMISSED) &&
                !g_error_matches(error, GTK_DIALOG_ERROR, GTK_DIALOG_ERROR_CANCELLED)) {
@@ -2293,31 +2513,55 @@ static void file_response(GObject *source, GAsyncResult *result, gpointer data)
     g_application_release(G_APPLICATION(p->application));
 }
 
-static void show_files(Player *p)
+static void show_file_chooser(Player *p, FilePurpose purpose)
 {
-    if (p->chooser)
+    if (p->chooser || p->closing || p->quit_requested ||
+        (purpose != FILE_OPEN_MEDIA && (!p->timeline.loaded || p->media_loading)))
         return;
     p->chooser = gtk_file_dialog_new();
     p->file_cancel = g_cancellable_new();
-    gtk_file_dialog_set_title(p->chooser, tr("Открыть медиафайл"));
-    gtk_file_dialog_set_accept_label(p->chooser, tr("Открыть"));
+    p->file_purpose = purpose;
+    p->chooser_generation = p->media_generation;
+    gtk_file_dialog_set_title(p->chooser, tr(purpose == FILE_ADD_AUDIO
+        ? "Добавить аудиодорожку" : purpose == FILE_ADD_SUBTITLE
+        ? "Добавить субтитры" : "Открыть медиафайл"));
+    gtk_file_dialog_set_accept_label(p->chooser,
+        tr(purpose == FILE_OPEN_MEDIA ? "Открыть" : "Добавить"));
     g_autoptr(GListStore) filters = g_list_store_new(GTK_TYPE_FILE_FILTER);
     g_autoptr(GtkFileFilter) media = gtk_file_filter_new();
     gtk_file_filter_set_name(media, tr("Видео и аудио"));
     gtk_file_filter_add_mime_type(media, "video/*");
     gtk_file_filter_add_mime_type(media, "audio/*");
-    gtk_file_filter_add_pattern(media, "*.m3u");
-    gtk_file_filter_add_pattern(media, "*.m3u8");
-    g_list_store_append(filters, media);
+    if (purpose == FILE_OPEN_MEDIA) {
+        gtk_file_filter_add_suffix(media, "m3u");
+        gtk_file_filter_add_suffix(media, "m3u8");
+    }
+    if (purpose != FILE_ADD_SUBTITLE) g_list_store_append(filters, media);
+    g_autoptr(GtkFileFilter) subtitles = gtk_file_filter_new();
+    gtk_file_filter_set_name(subtitles, tr("Файлы субтитров"));
+    for (guint i = 0; i < G_N_ELEMENTS(subtitle_extensions); ++i)
+        gtk_file_filter_add_suffix(subtitles, subtitle_extensions[i]);
+    if (purpose != FILE_ADD_AUDIO) g_list_store_append(filters, subtitles);
     g_autoptr(GtkFileFilter) all = gtk_file_filter_new();
     gtk_file_filter_set_name(all, tr("Все файлы"));
     gtk_file_filter_add_pattern(all, "*");
     g_list_store_append(filters, all);
     gtk_file_dialog_set_filters(p->chooser, G_LIST_MODEL(filters));
-    gtk_file_dialog_set_default_filter(p->chooser, media);
+    gtk_file_dialog_set_default_filter(p->chooser,
+        purpose == FILE_ADD_SUBTITLE ? subtitles : media);
     /* Keep Player alive until a cancelled portal request completes at close. */
     g_application_hold(G_APPLICATION(p->application));
     gtk_file_dialog_open_multiple(p->chooser, p->window, p->file_cancel, file_response, p);
+}
+
+static void show_files(Player *p)
+{
+    show_file_chooser(p, FILE_OPEN_MEDIA);
+}
+
+static void show_track_files(Player *p, gboolean audio)
+{
+    show_file_chooser(p, audio ? FILE_ADD_AUDIO : FILE_ADD_SUBTITLE);
 }
 
 static void url_accept(GtkButton *button, gpointer data)
@@ -3343,6 +3587,8 @@ static void action_activated(GSimpleAction *action, GVariant *parameter, gpointe
     if (g_str_equal(name, "new-window")) new_window(p);
     else if (g_str_equal(name, "about")) show_about(p);
     else if (g_str_equal(name, "open")) show_files(p);
+    else if (g_str_equal(name, "audio-add")) show_track_files(p, TRUE);
+    else if (g_str_equal(name, "subtitle-add")) show_track_files(p, FALSE);
     else if (g_str_equal(name, "url")) show_url(p);
     else if (g_str_equal(name, "play")) cycle_pause(p);
     else if (g_str_equal(name, "previous")) simple_command(p, "playlist-prev");
@@ -3624,6 +3870,7 @@ static void prepare_close(Player *p)
     if (p->preferences)
         preferences_window_commit(p->preferences);
     clear_track_notices(p);
+    cancel_track_additions(p);
     cursor_timeout_cancel(p);
     p->dragging = p->scrub_pending = FALSE;
     p->hwdec_refresh_at = p->input_refresh_at = p->info_refresh_at = 0;
@@ -3694,7 +3941,8 @@ static void install_actions(Player *p)
 {
     const char *names[] = {"open", "url", "play", "previous", "next", "fullscreen",
                           "mute", "queue", "quit", "audio", "subtitle", "speed",
-                          "settings", "config", "info", "new-window", "about", "trim", NULL};
+                          "settings", "config", "info", "new-window", "about", "trim",
+                          "audio-add", "subtitle-add", NULL};
     for (int i = 0; names[i]; ++i) {
         gboolean stateful = i >= 9 && i <= 11;
         GSimpleAction *action = stateful
@@ -4158,7 +4406,11 @@ static void activate(GtkApplication *application, gpointer data)
     gtk_widget_add_css_class(dismiss, "flat");
     g_signal_connect(dismiss, "clicked", G_CALLBACK(dismiss_error), p);
     gtk_box_append(GTK_BOX(p->error_bar), dismiss);
-    gtk_widget_set_visible(p->error_bar, FALSE);
+    gtk_widget_set_visible(p->error_bar, p->startup_error != NULL);
+    if (p->startup_error) {
+        gtk_label_set_text(GTK_LABEL(p->error_label), p->startup_error);
+        g_clear_pointer(&p->startup_error, g_free);
+    }
     gtk_box_append(GTK_BOX(root), p->error_bar);
 
     p->stage = gtk_overlay_new();
@@ -4706,6 +4958,7 @@ int main(int argc, char **argv)
     mpris_free(p.mpris);
     p.mpris = NULL;
     clear_track_notices(&p);
+    cancel_track_additions(&p);
     cursor_timeout_cancel(&p);
     if (p.wake_source) g_source_remove(p.wake_source);
     if (p.test_source) g_source_remove(p.test_source);
@@ -4735,6 +4988,8 @@ int main(int argc, char **argv)
     g_free(p.pending_hwdec);
     g_free(p.audio_output);
     g_free(p.audio_device);
+    g_free(p.hr_seek);
+    g_free(p.startup_error);
     clear_initial_subtitle(&p);
     for (guint i = 0; i < G_N_ELEMENTS(p.playlist_values); ++i)
         g_free(p.playlist_values[i]);

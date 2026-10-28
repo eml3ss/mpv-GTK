@@ -29,8 +29,8 @@ from unfinished interface work. Item 16 is tentative.
 ## 4. External audio and subtitle tracks
 
 - [x] Select and cycle audio and subtitle tracks already loaded by mpv.
-- [ ] Attach external subtitle and audio files through the interface.
-- [ ] Recognize dropped subtitle files as additions to the current video.
+- [x] Attach external subtitle and audio files through their track menus.
+- [x] Recognize dropped subtitle files as additions to the current video, and pair subtitles dropped with media with that queue entry.
 
 ## 5. Desktop integration through MPRIS
 
@@ -46,6 +46,7 @@ from unfinished interface work. Item 16 is tentative.
 ## 7. Timeline previews and precise seeking
 
 - [x] Seek immediately while dragging the timeline; display chapter markers.
+- [x] Configure mpv's precise-seeking mode (`hr-seek`) from Playback settings.
 - [x] Click the playback clock to switch its left side between elapsed and remaining time.
 - [x] Show a frame thumbnail and timestamp on hover (local-video prototype).
 - [x] Reuse a persistent native decoder with low-resolution keyframe previews and idle-time exact refinement.

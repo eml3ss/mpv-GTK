@@ -14,6 +14,7 @@ typedef struct {
     const char *gpu_api;
     const char *audio_output;
     const char *audio_device;
+    const char *hr_seek;
     const char *autocreate_playlist;
     const char *directory_mode;
     const char *directory_filter_types;
