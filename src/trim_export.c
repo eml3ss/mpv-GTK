@@ -39,7 +39,7 @@ typedef struct ExportJob {
     char *input, *source, *directory, *workspace, *temp, *backup, *target, *output;
     char *ffmpeg, *ffprobe, *phase, *failure, *open_path, *idle, *force_window;
     FileIdentity original, verified, replacement;
-    gboolean replace, open_result, committed, backup_created, sealed;
+    gboolean replace, open_result, committed, backup_created, sealed, exclude_video;
     gboolean saved, pause, user_changed, expected_load, seek_issued, restored;
     double position, open_position;
     gint64 index, entry_id, start_ms, end_ms;
@@ -756,6 +756,10 @@ static void begin_process(TrimExport *e, ProcessStage stage)
             g_ptr_array_add(args, g_strdup_printf("-0:%" G_GINT64_FORMAT,
                 g_array_index(j->excluded_audio, gint64, i)));
         }
+        if (j->exclude_video) {
+            g_ptr_array_add(args, g_strdup("-map"));
+            g_ptr_array_add(args, g_strdup("-0:V"));
+        }
         for (guint i = 0; suffix[i]; ++i) g_ptr_array_add(args, g_strdup(suffix[i]));
         g_ptr_array_add(args, NULL);
         run_process(e, (const char *const *)args->pdata);
@@ -768,11 +772,11 @@ static void begin_process(TrimExport *e, ProcessStage stage)
     }
 }
 
-static int verified_video_index(const char *text)
+static int verified_stream_index(const char *text, gboolean video)
 {
     /* ffprobe's flat output avoids adding a JSON runtime dependency. */
     g_auto(GStrv) lines = g_strsplit(text, "\n", -1);
-    typedef struct { int index, width, height, attached; gboolean video, have_index; } Stream;
+    typedef struct { int index, width, height, attached; gboolean video, audio, have_index; } Stream;
     GHashTable *streams = g_hash_table_new_full(g_direct_hash, g_direct_equal, NULL, g_free);
     for (guint i = 0; lines[i]; ++i) {
         unsigned slot;
@@ -782,7 +786,10 @@ static int verified_video_index(const char *text)
         Stream *stream = g_hash_table_lookup(streams, GUINT_TO_POINTER(slot + 1));
         if (!stream) { stream = g_new0(Stream, 1); g_hash_table_insert(streams, GUINT_TO_POINTER(slot + 1), stream); }
         const char *value = lines[i] + consumed;
-        if (g_str_equal(key, "codec_type")) stream->video = g_str_equal(value, "\"video\"");
+        if (g_str_equal(key, "codec_type")) {
+            stream->video = g_str_equal(value, "\"video\"");
+            stream->audio = g_str_equal(value, "\"audio\"");
+        }
         else if (g_str_equal(key, "index")) { stream->index = (int)g_ascii_strtoll(value, NULL, 10); stream->have_index = TRUE; }
         else if (g_str_equal(key, "width")) stream->width = (int)g_ascii_strtoll(value, NULL, 10);
         else if (g_str_equal(key, "height")) stream->height = (int)g_ascii_strtoll(value, NULL, 10);
@@ -793,8 +800,9 @@ static int verified_video_index(const char *text)
     g_hash_table_iter_init(&iter, streams);
     while (g_hash_table_iter_next(&iter, NULL, &value)) {
         Stream *stream = value;
-        if (stream->video && stream->have_index && stream->width > 0 && stream->height > 0 && !stream->attached &&
-            (result < 0 || stream->index < result)) result = stream->index;
+        gboolean usable = video ? stream->video && stream->width > 0 && stream->height > 0 && !stream->attached
+            : stream->audio;
+        if (usable && stream->have_index && (result < 0 || stream->index < result)) result = stream->index;
     }
     g_hash_table_unref(streams);
     return result;
@@ -806,7 +814,8 @@ static void decode_probe_frame(TrimExport *e, int index)
     g_autofree char *stream = g_strdup_printf("0:%d", index);
     j->process_stage = PROCESS_FRAME;
     const char *args[] = {j->ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin", "-xerror",
-        "-i", j->temp, "-map", stream, "-frames:v", "1", "-an", "-sn", "-f", "framehash", "pipe:1", NULL};
+        "-i", j->temp, "-map", stream, j->exclude_video ? "-frames:a" : "-frames:v", "1",
+        j->exclude_video ? "-vn" : "-an", "-sn", "-f", "framehash", "pipe:1", NULL};
     run_process(e, args);
 }
 
@@ -896,6 +905,7 @@ gboolean trim_export_start(TrimExport *e, const TrimExportRequest *request, GErr
     j->input = g_strdup(path); mpv_free(path);
     j->source = g_steal_pointer(&resolved);
     j->replace = request->replace; j->open_result = request->open_result;
+    j->exclude_video = request->exclude_video;
     j->start_ms = request->start_ms; j->end_ms = request->end_ms;
     j->excluded_audio = g_array_sized_new(FALSE, FALSE, sizeof(gint64), (guint)request->excluded_audio_count);
     if (request->excluded_audio_count)
@@ -929,12 +939,14 @@ gboolean trim_export_handle_event(TrimExport *e, const mpv_event *event)
         }
         if (j->process_stage == PROCESS_EXPORT) file_operation(e, OP_SEAL);
         else if (j->process_stage == PROCESS_PROBE) {
-            int stream = verified_video_index(stdout_text);
-            if (stream < 0) fail_job(e, "The export has no usable video stream.");
+            int stream = verified_stream_index(stdout_text, !j->exclude_video);
+            if (stream < 0) fail_job(e, j->exclude_video ? "The export has no usable audio stream."
+                : "The export has no usable video stream.");
             else decode_probe_frame(e, stream);
         } else {
             if (!g_regex_match_simple("(?m)^\\d+,\\s*-?\\d+,", stdout_text, 0, 0))
-                fail_job(e, "The selected interval has no decodable video frame.");
+                fail_job(e, j->exclude_video ? "The selected interval has no decodable audio frame."
+                    : "The selected interval has no decodable video frame.");
             else validated(e);
         }
         return TRUE;

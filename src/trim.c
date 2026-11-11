@@ -29,10 +29,10 @@ struct TrimMode {
     char *config_path, *runtime_directory;
     GtkWidget *button, *meta, *canvas, *group, *entries[2], *keys[2];
     GtkWidget *play_icon, *exports[2], *progress, *progress_label, *length;
-    GtkWidget *audio_button, *audio_popover;
+    GtkWidget *audio_button, *audio_popover, *video_check;
     GPtrArray *audio_choices;
     gint64 audio_file_serial;
-    gboolean audio_updating;
+    gboolean audio_updating, video_included;
     GArray *keyframes;
     cairo_path_t *marks;
     int marks_width, marks_height;
@@ -57,6 +57,7 @@ struct TrimMode {
 };
 
 static void cancel_drag(TrimMode *t);
+static void update_sensitivity(TrimMode *t);
 
 static void send_action(TrimMode *t, const char *action, const char *argument)
 {
@@ -269,6 +270,8 @@ static void clear_audio_menu(TrimMode *t)
         if (choice->check) g_signal_handlers_disconnect_by_data(choice->check, choice);
         choice->check = NULL;
     }
+    if (t->video_check) g_signal_handlers_disconnect_by_data(t->video_check, t);
+    t->video_check = NULL;
     if (t->audio_popover) gtk_popover_set_child(GTK_POPOVER(t->audio_popover), NULL);
 }
 
@@ -278,13 +281,16 @@ static void update_audio_button(TrimMode *t)
     guint selected = 0;
     for (guint i = 0; i < t->audio_choices->len; ++i)
         selected += ((TrimAudioChoice *)g_ptr_array_index(t->audio_choices, i))->included;
-    g_autofree char *tooltip = t->audio_choices->len
-        ? g_strdup_printf("%s · %u/%u", tr("Аудиодорожки для экспорта"), selected, t->audio_choices->len)
-        : g_strdup(tr("В файле нет аудиодорожек для экспорта."));
+    g_autofree char *tooltip = !t->audio_choices->len
+        ? g_strdup(tr("В файле нет аудиодорожек для экспорта."))
+        : t->video_included
+            ? g_strdup_printf("%s · %u/%u", tr("Аудиодорожки для экспорта"), selected, t->audio_choices->len)
+            : g_strdup_printf("%s · %u/%u · %s", tr("Аудиодорожки для экспорта"), selected,
+                              t->audio_choices->len, tr("Без видео"));
     gtk_widget_set_tooltip_text(t->audio_button, tooltip);
     gtk_accessible_update_property(GTK_ACCESSIBLE(t->audio_button),
                                   GTK_ACCESSIBLE_PROPERTY_LABEL, tooltip, -1);
-    if (selected < t->audio_choices->len) gtk_widget_add_css_class(t->audio_button, "active-track");
+    if (selected < t->audio_choices->len || !t->video_included) gtk_widget_add_css_class(t->audio_button, "active-track");
     else gtk_widget_remove_css_class(t->audio_button, "active-track");
 }
 
@@ -297,6 +303,15 @@ static void audio_choice_toggled(GtkCheckButton *check, gpointer data)
     g_autofree char *serial = g_strdup_printf("%" G_GINT64_FORMAT, choice->file_serial);
     const char *args[] = {index, gtk_check_button_get_active(check) ? "yes" : "no", serial};
     trim_backend_action(t->backend, "set-audio", G_N_ELEMENTS(args), args);
+}
+
+static void video_choice_toggled(GtkCheckButton *check, gpointer data)
+{
+    TrimMode *t = data;
+    if (t->stopped || t->audio_updating || t->busy || !t->available) return;
+    g_autofree char *serial = g_strdup_printf("%" G_GINT64_FORMAT, t->audio_file_serial);
+    const char *args[] = {gtk_check_button_get_active(check) ? "yes" : "no", serial};
+    trim_backend_action(t->backend, "set-video", G_N_ELEMENTS(args), args);
 }
 
 static void audio_all_clicked(GtkButton *button, gpointer data)
@@ -324,6 +339,21 @@ static void build_audio_menu(TrimMode *t)
     gtk_widget_set_margin_start(body, 6); gtk_widget_set_margin_end(body, 6);
     gtk_widget_set_margin_top(body, 6); gtk_widget_set_margin_bottom(body, 6);
     gtk_widget_set_size_request(body, 260, -1);
+    t->video_check = gtk_check_button_new();
+    GtkWidget *video = audio_label("Видео");
+    gtk_widget_add_css_class(video, "heading");
+    gtk_widget_set_margin_start(video, 4);
+    gtk_widget_set_margin_top(video, 2); gtk_widget_set_margin_bottom(video, 2);
+    gtk_widget_set_can_target(video, FALSE);
+    gtk_check_button_set_child(GTK_CHECK_BUTTON(t->video_check), video);
+    gtk_check_button_set_active(GTK_CHECK_BUTTON(t->video_check), t->video_included);
+    gtk_accessible_update_property(GTK_ACCESSIBLE(t->video_check),
+                                  GTK_ACCESSIBLE_PROPERTY_LABEL, tr("Видео"), -1);
+    g_signal_connect(t->video_check, "toggled", G_CALLBACK(video_choice_toggled), t);
+    gtk_box_append(GTK_BOX(body), t->video_check);
+    GtkWidget *separator = gtk_separator_new(GTK_ORIENTATION_HORIZONTAL);
+    gtk_widget_set_margin_top(separator, 2); gtk_widget_set_margin_bottom(separator, 2);
+    gtk_box_append(GTK_BOX(body), separator);
     GtkWidget *actions = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
     GtkWidget *heading = audio_label("Аудиодорожки");
     gtk_widget_add_css_class(heading, "heading");
@@ -392,6 +422,8 @@ static void update_audio_choices(TrimMode *t, const mpv_node *node)
     const mpv_node *tracks = field(node, "tracks");
     if (!tracks || tracks->format != MPV_FORMAT_NODE_ARRAY || !tracks->u.list) return;
     gint64 serial = number_field(node, "file_serial");
+    const mpv_node *video = field(node, "video_included");
+    t->video_included = !video || flag_field(node, "video_included");
     gboolean changed = serial != t->audio_file_serial || tracks->u.list->num != (int)t->audio_choices->len;
     for (int i = 0; !changed && i < tracks->u.list->num; ++i) {
         const mpv_node *row = &tracks->u.list->values[i];
@@ -422,9 +454,11 @@ static void update_audio_choices(TrimMode *t, const mpv_node *node)
             choice->included = flag_field(&tracks->u.list->values[i], "included");
             if (choice->check) gtk_check_button_set_active(GTK_CHECK_BUTTON(choice->check), choice->included);
         }
+        if (t->video_check) gtk_check_button_set_active(GTK_CHECK_BUTTON(t->video_check), t->video_included);
         t->audio_updating = FALSE;
     }
     update_audio_button(t);
+    update_sensitivity(t);
 }
 
 static void rounded(cairo_t *cr, double x, double y, double width, double height, double r)
@@ -745,8 +779,11 @@ static void update_sensitivity(TrimMode *t)
     gtk_widget_set_sensitive(t->audio_button, t->available && !t->busy && t->audio_choices->len > 0);
     if (!t->available || t->busy || !t->audio_choices->len)
         gtk_menu_button_popdown(GTK_MENU_BUTTON(t->audio_button));
+    gboolean any_track = t->video_included;
+    for (guint i = 0; !any_track && i < t->audio_choices->len; ++i)
+        any_track = ((TrimAudioChoice *)g_ptr_array_index(t->audio_choices, i))->included;
     for (int i = 0; i < 2; ++i) {
-        gtk_widget_set_sensitive(t->exports[i], t->available && !t->busy);
+        gtk_widget_set_sensitive(t->exports[i], t->available && !t->busy && any_track);
         gtk_widget_set_sensitive(t->keys[i], t->keyframes->len > 0);
     }
 }
@@ -830,6 +867,7 @@ TrimMode *trim_mode_new(const TrimHost *host)
     t->host.runtime_directory = t->runtime_directory;
     t->keyframes = g_array_new(FALSE, FALSE, sizeof(double));
     t->audio_choices = g_ptr_array_new_with_free_func(audio_choice_free);
+    t->video_included = TRUE;
     t->audio_file_serial = -1;
     t->button = g_object_ref_sink(glyph_button(SCISSORS, "Режим обрезки · Ctrl+T"));
     gtk_widget_set_visible(t->button, FALSE);

@@ -51,7 +51,7 @@ struct TrimBackend {
     guint wake_source;
     gboolean stopped, enabled, ever_enabled, loaded, video_available;
     gboolean gtk_editing, shortcuts_active, follows_duration;
-    gboolean remember, open_copy, open_replace;
+    gboolean remember, open_copy, open_replace, include_video;
     char *ffmpeg_path, *ffprobe_path, *state_path, *audio_source;
     gint64 start_ms, end_ms, duration_ms, file_serial;
     GArray *keyframes;
@@ -225,9 +225,10 @@ static void publish_audio(TrimBackend *b)
         tracks[i] = (mpv_node){.format = MPV_FORMAT_NODE_MAP, .u.list = &maps[i]};
     }
     mpv_node_list list = {.num = (int)count, .values = tracks};
-    char *keys[] = {"file_serial", "tracks", "selected_count", "total_count"};
+    char *keys[] = {"file_serial", "tracks", "selected_count", "total_count", "video_included"};
     mpv_node values[] = {node_integer(b->file_serial),
-        {.format = MPV_FORMAT_NODE_ARRAY, .u.list = &list}, node_integer(selected), node_integer(count)};
+        {.format = MPV_FORMAT_NODE_ARRAY, .u.list = &list}, node_integer(selected), node_integer(count),
+        node_flag(b->include_video)};
     publish_map(b, "user-data/trim-audio", G_N_ELEMENTS(keys), keys, values);
 }
 
@@ -303,6 +304,16 @@ static void select_audio(TrimBackend *b, gboolean all, int argc, const char *con
         if (!track) return;
         track->included = included;
     }
+    publish_audio(b);
+}
+
+static void select_video(TrimBackend *b, int argc, const char *const *argv)
+{
+    gint64 serial;
+    if (!b->enabled || !available(b) || trim_export_busy(b->exporter) || !argv || argc != 2 ||
+        !argv[0] || (!g_str_equal(argv[0], "yes") && !g_str_equal(argv[0], "no")) ||
+        !audio_argument_integer(argv[1], &serial) || serial != b->file_serial) return;
+    b->include_video = g_str_equal(argv[0], "yes");
     publish_audio(b);
 }
 
@@ -496,6 +507,7 @@ static void reset_file(TrimBackend *b)
     ++b->file_serial;
     g_clear_pointer(&b->audio_source, g_free);
     g_ptr_array_set_size(b->audio_tracks, 0);
+    b->include_video = TRUE;
     g_clear_pointer(&b->cached_file, g_free);
     clear_keyframes(b);
     publish_mode(b);
@@ -1008,7 +1020,7 @@ static gboolean client_message(TrimBackend *b, const mpv_event_client_message *m
     if (g_str_equal(name, "toggle") || g_str_equal(name, "set-enabled") || g_str_equal(name, "set-time") ||
         g_str_equal(name, "gtk-focus") || g_str_equal(name, "set-boundary") ||
         g_str_equal(name, "keyframe") || g_str_equal(name, "export") || g_str_equal(name, "edit-blur") ||
-        g_str_equal(name, "set-audio") || g_str_equal(name, "audio-all")) {
+        g_str_equal(name, "set-audio") || g_str_equal(name, "audio-all") || g_str_equal(name, "set-video")) {
         trim_backend_action(b, name, message->num_args - 1, (const char *const *)(message->args + 1));
         return TRUE;
     }
@@ -1080,6 +1092,7 @@ TrimBackend *trim_backend_new_with_runtime(mpv_handle *mpv, const char *config_p
     b->mpv = mpv;
     b->wake_fd = -1;
     b->follows_duration = TRUE;
+    b->include_video = TRUE;
     b->keyframe_target = -1;
     b->playback_speed = 1; b->playback_fps = 25;
     b->keyframes = g_array_new(FALSE, FALSE, sizeof(double));
@@ -1135,6 +1148,7 @@ void trim_backend_action(TrimBackend *b, const char *action, int argc, const cha
     } else if (g_str_equal(action, "keyframe")) jump_keyframe(b, argument);
     else if (g_str_equal(action, "set-audio")) select_audio(b, FALSE, argc, argv);
     else if (g_str_equal(action, "audio-all")) select_audio(b, TRUE, argc, argv);
+    else if (g_str_equal(action, "set-video")) select_video(b, argc, argv);
     else if (g_str_equal(action, "export")) {
         if (!b->enabled || !available(b) || (!g_str_equal(argument, "keep") && !g_str_equal(argument, "replace")) ||
             trim_export_busy(b->exporter)) return;
@@ -1148,12 +1162,17 @@ void trim_backend_action(TrimBackend *b, const char *action, int argc, const cha
             AudioTrack *track = g_ptr_array_index(b->audio_tracks, i);
             if (!track->included) g_array_append_val(excluded, track->ff_index);
         }
+        if (!b->include_video && excluded->len == b->audio_tracks->len) {
+            publish_failure(b, "Select video or at least one audio track to export.");
+            return;
+        }
         gboolean replace = g_str_equal(argument, "replace");
         TrimExportRequest request = {.ffmpeg_path = b->ffmpeg_path, .ffprobe_path = b->ffprobe_path,
             .expected_input = b->audio_source,
             .replace = replace, .open_result = replace ? b->open_replace : b->open_copy,
             .start_ms = b->start_ms, .end_ms = b->end_ms,
-            .excluded_audio = (const gint64 *)excluded->data, .excluded_audio_count = excluded->len};
+            .excluded_audio = (const gint64 *)excluded->data, .excluded_audio_count = excluded->len,
+            .exclude_video = !b->include_video};
         g_autoptr(GError) error = NULL;
         if (!trim_export_start(b->exporter, &request, &error))
             publish_failure(b, error ? error->message : "Could not start the export.");

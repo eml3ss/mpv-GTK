@@ -197,6 +197,27 @@ try:
     assert_streams(Path(result['path']),['eng','rus'])
     assert hashlib.sha256(source.read_bytes()).hexdigest()==before
     print('PASS all-audio copy export',flush=True)
+    state=audio_state()
+    assert state['video_included'] is True,state
+    action('set-video','no',str(state['file_serial']))
+    wait(lambda:prop('user-data/trim-audio'),lambda x:x and x.get('video_included') is False)
+    action('export','keep')
+    wait(lambda:prop('user-data/trim-export'),lambda x:x and x.get('busy'))
+    result=wait(lambda:prop('user-data/trim-export'),lambda x:x and not x.get('busy') and 'success' in x,seconds=12)
+    assert result['success'],result
+    streams=json.loads(subprocess.check_output(['ffprobe','-v','error','-show_streams',
+        '-of','json',result['path']],text=True))['streams']
+    assert not any(x['codec_type']=='video' for x in streams),streams
+    assert sum(x['codec_type']=='audio' for x in streams)==2,streams
+    assert hashlib.sha256(source.read_bytes()).hexdigest()==before
+    audio_all(False)
+    action('export','keep')
+    result=wait(lambda:prop('user-data/trim-export'),lambda x:x and x.get('success') is False)
+    assert 'Select video' in result['error'],result
+    action('set-video','yes',str(state['file_serial']))
+    wait(lambda:prop('user-data/trim-audio'),lambda x:x and x.get('video_included') is True)
+    audio_all(True)
+    print('PASS video-free copy export and empty-selection rejection',flush=True)
     audio_one(russian)
     action('export','replace')
     wait(lambda:prop('user-data/trim-export'),lambda x:x and x.get('busy'))

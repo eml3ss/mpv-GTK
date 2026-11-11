@@ -28,7 +28,7 @@ original script. Repeated edits continue smoothly from the current drawing.
 | Set end at current position | Right boundary button / O |
 | Previous / next keyframe | Key buttons / `[` and `]` |
 | Play / pause | Center playback button / Space |
-| Choose exported audio tracks | Audio selection button beside the export buttons |
+| Choose exported video and audio tracks | Track selection button beside the export buttons |
 | Export a copy, keeping the original | Copy export button / Ctrl+E |
 | Export and replace the original | Replace export button / Ctrl+Shift+E |
 
@@ -57,18 +57,22 @@ holds the controls while the interaction is active.
 FFmpeg and ffprobe are required. Exports support local video files and use
 FFmpeg stream copy, subject to the original codec/keyframe cutting behavior.
 They keep the original extension, metadata, chapter mapping, and source streams
-except audio tracks explicitly excluded from export.
+except video or audio tracks explicitly excluded from export.
 MP4 audio track names remain readable by mpv after export, including when
 only a subset of the original tracks is kept. The completed temporary file's
 audio title atoms are normalized before verification; source files are not
 patched during copy exports.
 
-The audio selection button opens a compact menu above it, with checkboxes for
-the source file's audio tracks, with titles, language, and codec when available.
-All tracks are included initially. Select any subset, use **All** to restore
-them, or choose
-**No audio** for a silent result. The button uses the theme accent when the
-selection differs from all tracks. This does not change the audio being played.
+The track selection button opens a compact menu above it. A **Video** checkbox
+at the top, separated from the audio list, keeps or drops the source's video
+streams; embedded cover art is kept. Video-free exports are verified by decoding
+an audio frame instead of a video frame. Below it are checkboxes for the source
+file's audio tracks, with titles, language, and codec when available.
+Video and all audio tracks are included initially. Select any subset, use
+**All** to restore the audio tracks, or choose **No audio** for a silent result.
+At least video or one audio track must remain; otherwise the export buttons are
+disabled. The button uses the theme accent when the selection differs from
+all tracks. This does not change what is being played.
 The selection applies to both export buttons and their shortcuts, is frozen
 when export starts, and resets to all tracks when a different file loads.
 External audio files attached to playback are not part of the source export.
@@ -99,7 +103,7 @@ The system mpv plugin and configuration are unchanged.
 
 The focused integration check, `make test-trim`, uses generated media and an
 isolated configuration to exercise activation, keyframes, boundary validation,
-selected/all/silent audio exports, reopening, and shutdown with all Lua scripts disabled.
+selected/all/silent audio and video-free exports, reopening, and shutdown with all Lua scripts disabled.
 It also checks filename collisions, tool failures, concurrent source changes,
 and cancellation during export. Its native check deliberately fails opening a
 replacement and verifies that rollback restores the original bytes, permissions,
