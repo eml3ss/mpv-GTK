@@ -14,9 +14,12 @@ typedef struct {
      * call validates and copies this array; NULL/zero preserves all audio. */
     const gint64 *excluded_audio;
     gsize excluded_audio_count;
-    /* Omit the source's video streams (attached pictures stay); the export
-     * is then verified by decoding an audio frame instead of a video frame. */
+    /* Keep only the audio streams, stream-copied into a container named by
+     * audio_extension (for example ".opus"). The export is verified by
+     * decoding an audio frame. A replacement export with a different
+     * extension saves beside the original, then removes the original. */
     gboolean exclude_video;
+    const char *audio_extension;
 } TrimExportRequest;
 
 TrimExport *trim_export_new(mpv_handle *mpv);

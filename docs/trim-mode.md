@@ -64,10 +64,9 @@ audio title atoms are normalized before verification; source files are not
 patched during copy exports.
 
 The track selection button opens a compact menu above it. A **Video** checkbox
-at the top, separated from the audio list, keeps or drops the source's video
-streams; embedded cover art is kept. Video-free exports are verified by decoding
-an audio frame instead of a video frame. Below it are checkboxes for the source
-file's audio tracks, with titles, language, and codec when available.
+at the top, separated from the audio list, keeps or drops the source's video.
+Below it are checkboxes for the source file's audio tracks, with titles,
+language, and codec when available.
 Video and all audio tracks are included initially. Select any subset, use
 **All** to restore the audio tracks, or choose **No audio** for a silent result.
 At least video or one audio track must remain; otherwise the export buttons are
@@ -76,6 +75,16 @@ all tracks. This does not change what is being played.
 The selection applies to both export buttons and their shortcuts, is frozen
 when export starts, and resets to all tracks when a different file loads.
 External audio files attached to playback are not part of the source export.
+
+Without video, the export keeps only the selected audio, stream-copied without
+re-encoding into a container that matches its codec: Opus → `.opus`,
+AAC/ALAC → `.m4a`, MP3 → `.mp3`, FLAC → `.flac`, Vorbis → `.ogg`,
+AC-3/E-AC-3/DTS → `.ac3`/`.eac3`/`.dts`, little-endian PCM → `.wav`.
+Other codecs and selections with several tracks use Matroska audio (`.mka`).
+Such exports are verified by decoding an audio frame. A replacement saves
+`name.<ext>` beside the original, never overwriting an existing file, then
+removes the original video and points its queue entry at the new file;
+rollback restores the original if reopening fails.
 
 Copy export saves beside the source with the selected times in its name;
 existing files are never overwritten. Replacement export writes and checks a

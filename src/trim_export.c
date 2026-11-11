@@ -38,6 +38,7 @@ typedef struct ExportJob {
     GCancellable *cancel;
     char *input, *source, *directory, *workspace, *temp, *backup, *target, *output;
     char *ffmpeg, *ffprobe, *phase, *failure, *open_path, *idle, *force_window;
+    char *extension, *renamed; /* Audio-only container; replacement saved under a new name. */
     FileIdentity original, verified, replacement;
     gboolean replace, open_result, committed, backup_created, sealed, exclude_video;
     gboolean saved, pause, user_changed, expected_load, seek_issued, restored;
@@ -47,7 +48,7 @@ typedef struct ExportJob {
     guint timeout;
     uint64_t process_id;
     ProcessStage process_stage;
-    gboolean worker_pending;
+    gboolean worker_pending, inserted;
 } ExportJob;
 
 struct TrimExport {
@@ -132,6 +133,7 @@ static void job_unref(ExportJob *j)
     g_free(j->temp); g_free(j->backup); g_free(j->target); g_free(j->output);
     g_free(j->ffmpeg); g_free(j->ffprobe); g_free(j->phase); g_free(j->failure);
     g_free(j->open_path); g_free(j->idle); g_free(j->force_window);
+    g_free(j->extension); g_free(j->renamed);
     g_clear_pointer(&j->excluded_audio, g_array_unref);
     g_free(j);
 }
@@ -303,11 +305,16 @@ static gboolean prepare_files(ExportJob *j, GError **error)
     j->directory = g_path_get_dirname(j->source);
     g_autofree char *name = g_path_get_basename(j->source);
     char *dot = strrchr(name, '.');
-    const char *extension = dot && dot != name ? dot : "";
-    g_autofree char *stem = *extension ? g_strndup(name, extension - name) : g_strdup(name);
+    const char *source_extension = dot && dot != name ? dot : "";
+    g_autofree char *stem = *source_extension ? g_strndup(name, source_extension - name) : g_strdup(name);
+    const char *extension = j->extension ? j->extension : source_extension;
     g_autofree char *first = filename_time(j->start_ms), *last = filename_time(j->end_ms);
     g_autofree char *target_name = g_strdup_printf("%s_%s-%s%s", stem, first, last, extension);
     j->target = g_build_filename(j->directory, target_name, NULL);
+    if (j->replace && g_strcmp0(extension, source_extension) != 0) {
+        g_autofree char *renamed = g_strconcat(stem, extension, NULL);
+        j->renamed = g_build_filename(j->directory, renamed, NULL);
+    }
     j->workspace = g_build_filename(j->directory, ".mpv-trim-XXXXXX", NULL);
     if (!g_mkdtemp_full(j->workspace, 0700)) return file_error(error, "Cannot create export workspace", j->directory);
     g_autofree char *temp_name = g_strconcat("partial", extension, NULL);
@@ -347,6 +354,25 @@ static gboolean commit_copy(ExportJob *j, GError **error)
     return FALSE;
 }
 
+static gboolean rename_exclusive(const char *source, const char *target, GError **error)
+{
+#ifdef SYS_renameat2
+    if (syscall(SYS_renameat2, AT_FDCWD, source, AT_FDCWD, target, RENAME_NOREPLACE) == 0) return TRUE;
+    if (errno != ENOSYS && errno != EINVAL && errno != EOPNOTSUPP) {
+        if (errno == EEXIST || errno == ENOTEMPTY) goto exists;
+        return file_error(error, "Cannot save", target);
+    }
+#endif
+    if (link(source, target) == 0) { unlink(source); return TRUE; }
+    if (errno != EEXIST) return file_error(error, "Cannot save", target);
+#ifdef SYS_renameat2
+exists:
+#endif
+    g_set_error(error, G_IO_ERROR, G_IO_ERROR_EXISTS,
+                "%s already exists; the original was not replaced.", target);
+    return FALSE;
+}
+
 static gboolean commit_files(ExportJob *j, GError **error)
 {
     FileIdentity current;
@@ -370,6 +396,16 @@ static gboolean commit_files(ExportJob *j, GError **error)
         return FALSE;
     }
     if (chmod(j->temp, fresh.mode) != 0) return file_error(error, "Cannot set permissions on", j->temp);
+    if (j->renamed) {
+        /* The original stays in place until the new file exists and is
+         * recorded, so rollback can always restore it from the backup. */
+        if (!rename_exclusive(j->temp, j->renamed, error)) return FALSE;
+        j->committed = TRUE;
+        j->output = g_strdup(j->renamed);
+        if (!read_identity(j->renamed, &j->replacement, error)) return FALSE;
+        if (unlink(j->source) != 0) return file_error(error, "Cannot remove", j->source);
+        return TRUE;
+    }
     if (rename(j->temp, j->source) != 0) return file_error(error, "Cannot replace", j->source);
     j->committed = TRUE;
     j->output = g_strdup(j->source);
@@ -385,9 +421,10 @@ static gboolean rollback_files(ExportJob *j, GError **error)
         g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_NOT_FOUND, "The original backup is missing.");
         return FALSE;
     }
+    const char *replaced = j->renamed ? j->renamed : j->source;
     struct stat status;
-    if (lstat(j->source, &status) == 0) {
-        if (!S_ISREG(status.st_mode) || !read_identity(j->source, &current, error)) {
+    if (lstat(replaced, &status) == 0) {
+        if (!S_ISREG(status.st_mode) || !read_identity(replaced, &current, error)) {
             if (!error || !*error) g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_BUSY,
                 "The replacement path changed; the original backup was retained.");
             return FALSE;
@@ -397,8 +434,9 @@ static gboolean rollback_files(ExportJob *j, GError **error)
                                 "The replacement changed after export; the backup was retained instead of overwriting it.");
             return FALSE;
         }
+        if (j->renamed && unlink(replaced) != 0) return file_error(error, "Cannot remove", replaced);
     } else if (errno != ENOENT) {
-        return file_error(error, "Cannot inspect replacement for recovery", j->source);
+        return file_error(error, "Cannot inspect replacement for recovery", replaced);
     }
     if (cancelled(j, error)) return FALSE;
     if (rename(j->backup, j->source) != 0) return file_error(error, "Cannot restore", j->source);
@@ -516,6 +554,44 @@ static gint64 saved_entry_index(TrimExport *e)
     return index;
 }
 
+static gint64 playlist_index_of(TrimExport *e, const char *path)
+{
+    mpv_node playlist = {0};
+    if (!path || mpv_get_property(e->mpv, "playlist", MPV_FORMAT_NODE, &playlist) < 0) return -1;
+    gint64 index = -1;
+    if (playlist.format == MPV_FORMAT_NODE_ARRAY && playlist.u.list) {
+        for (int i = 0; i < playlist.u.list->num; ++i) {
+            const mpv_node *filename = map_field(&playlist.u.list->values[i], "filename");
+            if (filename && filename->format == MPV_FORMAT_STRING &&
+                g_strcmp0(filename->u.string, path) == 0) { index = i; break; }
+        }
+    }
+    mpv_free_node_contents(&playlist);
+    return index;
+}
+
+static void remove_playlist_entry(TrimExport *e, gint64 index)
+{
+    if (index < 0) return;
+    g_autofree char *text = g_strdup_printf("%" G_GINT64_FORMAT, index);
+    const char *remove[] = {"playlist-remove", text, NULL};
+    mpv_command_async(e->mpv, 0, remove);
+}
+
+/* A renamed replacement leaves the original path missing: point its queue
+ * entry at the new file without starting playback. */
+static void swap_renamed_entry(TrimExport *e)
+{
+    ExportJob *j = e->job;
+    if (!j || !j->renamed || !j->committed || e->stopped) return;
+    gint64 index = j->saved ? saved_entry_index(e) : playlist_index_of(e, j->input);
+    if (index < 0) return;
+    g_autofree char *next = g_strdup_printf("%" G_GINT64_FORMAT, index + 1);
+    const char *insert[] = {"loadfile", j->output, "insert-at", next, NULL};
+    mpv_command_async(e->mpv, 0, insert);
+    remove_playlist_entry(e, index);
+}
+
 static void open_video(TrimExport *e, gboolean restoring)
 {
     ExportJob *j = e->job;
@@ -534,13 +610,21 @@ static void open_video(TrimExport *e, gboolean restoring)
     j->expected_load = TRUE; j->seek_issued = FALSE;
     j->timeout = g_timeout_add_seconds(15, open_timeout, e);
     g_autofree char *index = g_strdup_printf("%" G_GINT64_FORMAT, selected);
-    if (!j->replace && !restoring) {
+    if ((!j->replace || j->renamed) && !restoring) {
         g_autofree char *next = g_strdup_printf("%" G_GINT64_FORMAT, selected + 1);
         const char *insert[] = {"loadfile", j->output, "insert-at", next, NULL};
         const char *select[] = {"playlist-play-index", next, NULL};
         mpv_command_async(e->mpv, 0, insert);
         mpv_command_async(e->mpv, 0, select);
+        j->inserted = j->renamed != NULL;
     } else {
+        if (j->inserted) {
+            /* The renamed replacement was rolled back; drop its queue entry. */
+            remove_playlist_entry(e, playlist_index_of(e, j->renamed));
+            j->inserted = FALSE;
+            selected = saved_entry_index(e);
+            g_free(index); index = g_strdup_printf("%" G_GINT64_FORMAT, selected);
+        }
         const char *select[] = {"playlist-play-index", index, NULL};
         mpv_command_async(e->mpv, 0, select);
     }
@@ -681,7 +765,7 @@ static void file_done(GObject *source, GAsyncResult *result, gpointer data)
     case OP_COMMIT:
         if (!j->replace && j->open_result && same_source(e)) save_playback(e);
         if (j->saved && !j->user_changed && j->open_result) open_video(e, FALSE);
-        else { publish(e, "cleanup"); file_operation(e, OP_CLEAN_SUCCESS); }
+        else { swap_renamed_entry(e); publish(e, "cleanup"); file_operation(e, OP_CLEAN_SUCCESS); }
         break;
     case OP_ROLLBACK: open_video(e, TRUE); break;
     case OP_CLEAN_SUCCESS: finish(e, TRUE, NULL); break;
@@ -745,7 +829,7 @@ static void begin_process(TrimExport *e, ProcessStage stage)
         g_ascii_formatd(length, sizeof(length), "%.3f", (j->end_ms - j->start_ms) / 1000.0);
         g_autofree char *subtitles = g_strdup_printf("setts=duration='max(0,min(DURATION,%s/TB-PTS))'", length);
         const char *prefix[] = {j->ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin", "-n",
-            "-ss", start, "-i", j->source, "-t", length, "-map", "0", NULL};
+            "-ss", start, "-i", j->source, "-t", length, "-map", j->exclude_video ? "0:a" : "0", NULL};
         const char *suffix[] = {"-map_metadata", "0",
             "-map_chapters", "0", "-c", "copy", "-bsf:s", subtitles,
             "-avoid_negative_ts", "make_zero", j->temp, NULL};
@@ -755,10 +839,6 @@ static void begin_process(TrimExport *e, ProcessStage stage)
             g_ptr_array_add(args, g_strdup("-map"));
             g_ptr_array_add(args, g_strdup_printf("-0:%" G_GINT64_FORMAT,
                 g_array_index(j->excluded_audio, gint64, i)));
-        }
-        if (j->exclude_video) {
-            g_ptr_array_add(args, g_strdup("-map"));
-            g_ptr_array_add(args, g_strdup("-0:V"));
         }
         for (guint i = 0; suffix[i]; ++i) g_ptr_array_add(args, g_strdup(suffix[i]));
         g_ptr_array_add(args, NULL);
@@ -866,6 +946,13 @@ static gboolean validate_audio_selection(TrimExport *e, const TrimExportRequest 
     return valid;
 }
 
+static gboolean valid_extension(const char *extension)
+{
+    if (!extension || extension[0] != '.' || !extension[1] || strlen(extension) > 8) return FALSE;
+    for (const char *p = extension + 1; *p; ++p) if (!g_ascii_isalnum(*p)) return FALSE;
+    return TRUE;
+}
+
 gboolean trim_export_start(TrimExport *e, const TrimExportRequest *request, GError **error)
 {
     if (!e || e->stopped || e->job) {
@@ -891,6 +978,11 @@ gboolean trim_export_start(TrimExport *e, const TrimExportRequest *request, GErr
         return FALSE;
     }
     if (!validate_audio_selection(e, request, error)) { mpv_free(path); return FALSE; }
+    if (request->exclude_video && !valid_extension(request->audio_extension)) {
+        mpv_free(path);
+        g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT, "The audio export format is invalid.");
+        return FALSE;
+    }
     char *current = mpv_get_property_string(e->mpv, "path");
     gboolean same_input = g_strcmp0(path, current) == 0;
     mpv_free(current);
@@ -906,6 +998,7 @@ gboolean trim_export_start(TrimExport *e, const TrimExportRequest *request, GErr
     j->source = g_steal_pointer(&resolved);
     j->replace = request->replace; j->open_result = request->open_result;
     j->exclude_video = request->exclude_video;
+    j->extension = j->exclude_video ? g_strdup(request->audio_extension) : NULL;
     j->start_ms = request->start_ms; j->end_ms = request->end_ms;
     j->excluded_audio = g_array_sized_new(FALSE, FALSE, sizeof(gint64), (guint)request->excluded_audio_count);
     if (request->excluded_audio_count)
@@ -988,6 +1081,8 @@ gboolean trim_export_handle_event(TrimExport *e, const mpv_event *event)
         }
         if (g_strcmp0(j->phase, "restoring") == 0) file_operation(e, OP_CLEAN_FAILURE);
         else if (g_strcmp0(j->phase, "opening") == 0) {
+            /* The renamed replacement now plays; its missing original goes. */
+            if (j->inserted) { remove_playlist_entry(e, saved_entry_index(e)); j->inserted = FALSE; }
             publish(e, "cleanup"); file_operation(e, OP_CLEAN_SUCCESS);
         }
     }

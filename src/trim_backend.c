@@ -307,6 +307,20 @@ static void select_audio(TrimBackend *b, gboolean all, int argc, const char *con
     publish_audio(b);
 }
 
+static const char *audio_extension(const char *codec)
+{
+    /* Containers that accept a stream copy of a single track of each codec. */
+    static const struct { const char *codec, *extension; } formats[] = {
+        {"opus", ".opus"}, {"vorbis", ".ogg"}, {"aac", ".m4a"}, {"alac", ".m4a"},
+        {"mp3", ".mp3"}, {"flac", ".flac"}, {"ac3", ".ac3"}, {"eac3", ".eac3"}, {"dts", ".dts"},
+        {"pcm_u8", ".wav"}, {"pcm_s16le", ".wav"}, {"pcm_s24le", ".wav"}, {"pcm_s32le", ".wav"},
+        {"pcm_f32le", ".wav"}, {"pcm_f64le", ".wav"}
+    };
+    for (gsize i = 0; codec && i < G_N_ELEMENTS(formats); ++i)
+        if (g_str_equal(codec, formats[i].codec)) return formats[i].extension;
+    return ".mka";
+}
+
 static void select_video(TrimBackend *b, int argc, const char *const *argv)
 {
     gint64 serial;
@@ -1166,13 +1180,22 @@ void trim_backend_action(TrimBackend *b, const char *action, int argc, const cha
             publish_failure(b, "Select video or at least one audio track to export.");
             return;
         }
+        const char *extension = NULL;
+        if (!b->include_video) {
+            const AudioTrack *first = NULL;
+            for (guint i = 0; !first && i < b->audio_tracks->len; ++i) {
+                AudioTrack *track = g_ptr_array_index(b->audio_tracks, i);
+                if (track->included) first = track;
+            }
+            extension = b->audio_tracks->len - excluded->len == 1 ? audio_extension(first->codec) : ".mka";
+        }
         gboolean replace = g_str_equal(argument, "replace");
         TrimExportRequest request = {.ffmpeg_path = b->ffmpeg_path, .ffprobe_path = b->ffprobe_path,
             .expected_input = b->audio_source,
             .replace = replace, .open_result = replace ? b->open_replace : b->open_copy,
             .start_ms = b->start_ms, .end_ms = b->end_ms,
             .excluded_audio = (const gint64 *)excluded->data, .excluded_audio_count = excluded->len,
-            .exclude_video = !b->include_video};
+            .exclude_video = !b->include_video, .audio_extension = extension};
         g_autoptr(GError) error = NULL;
         if (!trim_export_start(b->exporter, &request, &error))
             publish_failure(b, error ? error->message : "Could not start the export.");

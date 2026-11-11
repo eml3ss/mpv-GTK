@@ -113,6 +113,7 @@ implementation task. Queue restoration remains a separate task under item 2.
 - [x] Export a separate copy or replace the original using the native lossless backend.
 - [x] Choose which source audio tracks to include in copy and replacement exports, including silent exports.
 - [x] Include or exclude the source video from exports through a separate toggle above the audio tracks.
+- [x] Save video-free exports losslessly in a container matching the audio codec (for example `.opus` or `.m4a`), including replacement.
 - [x] Preserve MP4 audio track names in copy and replacement exports, including selected-track exports.
 - [x] Preserve export verification, backup/rollback, result opening, and playback state.
 - [x] Show native GTK export progress; initialize the backend and trim controls on demand.

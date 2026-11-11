@@ -25,6 +25,8 @@ subprocess.run(['ffmpeg','-nostdin','-v','error',
     '-metadata:s:a:0','language=eng','-metadata:s:a:0','title=English original',
     '-metadata:s:a:1','language=rus','-metadata:s:a:1','title=Russian commentary',
     '-metadata:s:s:0','language=eng','-shortest',str(source)],check=True)
+second=tmp/'Second clip.mkv'
+shutil.copy(source,second)
 external=tmp/'external.flac'
 subprocess.run(['ffmpeg','-nostdin','-v','error','-f','lavfi','-i',
     'sine=frequency=220:sample_rate=48000:duration=4','-c:a','flac',str(external)],check=True)
@@ -209,7 +211,18 @@ try:
         '-of','json',result['path']],text=True))['streams']
     assert not any(x['codec_type']=='video' for x in streams),streams
     assert sum(x['codec_type']=='audio' for x in streams)==2,streams
+    assert not any(x['codec_type']=='subtitle' for x in streams),streams
+    assert Path(result['path']).suffix=='.mka',result
     assert hashlib.sha256(source.read_bytes()).hexdigest()==before
+    audio_one(russian)
+    action('export','keep')
+    wait(lambda:prop('user-data/trim-export'),lambda x:x and x.get('busy'))
+    result=wait(lambda:prop('user-data/trim-export'),lambda x:x and not x.get('busy') and 'success' in x,seconds=12)
+    assert result['success'],result
+    assert Path(result['path']).suffix=='.wav',result
+    streams=json.loads(subprocess.check_output(['ffprobe','-v','error','-show_streams',
+        '-of','json',result['path']],text=True))['streams']
+    assert [x['codec_type'] for x in streams]==['audio'],streams
     audio_all(False)
     action('export','keep')
     result=wait(lambda:prop('user-data/trim-export'),lambda x:x and x.get('success') is False)
@@ -248,6 +261,32 @@ try:
     assert source.read_bytes()==replacement_bytes
     (tmp/'fail-tool').unlink()
     print('PASS failed FFmpeg never replaces the source',flush=True)
+    previous=audio_state()['file_serial']
+    call('loadfile',str(second))
+    audio=wait(lambda:prop('user-data/trim-audio'),
+        lambda x:x and x['file_serial']!=previous and x['total_count']==2)
+    wait(lambda:prop('user-data/trim-controls'),lambda x:x and x.get('available'))
+    audio_one(next(x for x in audio['tracks'] if x['lang']=='eng'))
+    action('set-video','no',str(audio['file_serial']))
+    wait(lambda:prop('user-data/trim-audio'),lambda x:x and x.get('video_included') is False)
+    action('export','replace')
+    wait(lambda:prop('user-data/trim-export'),lambda x:x and x.get('busy'))
+    result=wait(lambda:prop('user-data/trim-export'),lambda x:x and not x.get('busy') and 'success' in x,seconds=12)
+    assert result['success'],result
+    renamed=tmp/'Second clip.wav'
+    assert Path(result['path'])==renamed and renamed.exists() and not second.exists(),result
+    streams=json.loads(subprocess.check_output(['ffprobe','-v','error','-show_streams',
+        '-of','json',str(renamed)],text=True))['streams']
+    assert [x['codec_type'] for x in streams]==['audio'],streams
+    wait(lambda:prop('path'),lambda x:x and Path(x)==renamed)
+    assert [x['filename'] for x in prop('playlist')]==[str(renamed)],prop('playlist')
+    assert not list(tmp.glob('.mpv-trim-*')),list(tmp.glob('.mpv-trim-*'))
+    print('PASS audio-only replacement saves the source codec container and swaps the queue entry',flush=True)
+    previous=audio_state()['file_serial']
+    call('loadfile',str(source))
+    wait(lambda:prop('user-data/trim-audio'),lambda x:x and x['file_serial']!=previous and x.get('video_included'))
+    wait(lambda:prop('user-data/trim-controls'),lambda x:x and x.get('available'))
+    wait(lambda:prop('user-data/trim-mode'),lambda x:x and x.get('enabled'))
     (tmp/'hold-export').touch()
     action('export','replace')
     wait(lambda:(tmp/'export-ready').exists())
