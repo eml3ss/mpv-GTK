@@ -4282,9 +4282,82 @@ static gboolean self_test(gpointer data)
     return G_SOURCE_CONTINUE;
 }
 
+/* Driver libraries are loaded on first use by GTK and libmpv, on the main
+ * thread. Loading them here overlaps that cost with GTK initialization. */
+static gpointer warm_egl_drivers(gpointer data)
+{
+    (void)data;
+    void *egl = dlopen("libEGL.so.1", RTLD_LAZY | RTLD_LOCAL);
+    const char *(*query)(void *, int) = NULL;
+    if (egl) {
+        void *symbol = dlsym(egl, "eglQueryString");
+        memcpy(&query, &symbol, sizeof(query));
+    }
+    /* Client extensions make libglvnd load every vendor driver; no display
+     * or context is created. The library stays loaded for GTK. */
+    if (query)
+        query(NULL, 0x3055 /* EGL_EXTENSIONS */);
+    startup_trace_mark("EGL drivers preloaded");
+    return NULL;
+}
+
+static gboolean hwdec_names_cuda(const char *hwdec)
+{
+    if (!hwdec)
+        return FALSE;
+    g_auto(GStrv) choices = g_strsplit(hwdec, ",", -1);
+    for (guint i = 0; choices[i]; ++i) {
+        const char *choice = g_strstrip(choices[i]);
+        if (g_str_equal(choice, "no"))
+            return FALSE;
+        if (g_str_equal(choice, "nvdec") || g_str_equal(choice, "cuda") ||
+            g_str_has_suffix(choice, "-nvdec") || g_str_has_suffix(choice, "-cuda") ||
+            g_str_equal(choice, "nvdec-copy") || g_str_equal(choice, "cuda-copy"))
+            return TRUE;
+    }
+    return FALSE;
+}
+
+static gpointer warm_cuda(gpointer data)
+{
+    (void)data;
+    void *cuda = dlopen("libcuda.so.1", RTLD_LAZY | RTLD_LOCAL);
+    int (*initialize)(unsigned int) = NULL;
+    if (cuda) {
+        void *symbol = dlsym(cuda, "cuInit");
+        memcpy(&initialize, &symbol, sizeof(initialize));
+    }
+    /* Process-wide and idempotent; libmpv's own cuInit then returns at once. */
+    if (initialize)
+        initialize(0);
+    startup_trace_mark("CUDA preloaded");
+    return NULL;
+}
+
+static GThread *driver_warmups[2];
+
+/* Only an explicit NVDEC/CUDA choice warms CUDA: with automatic selection
+ * the active GPU is unknown here, and a sleeping discrete GPU stays asleep. */
+static void warm_drivers(Player *p)
+{
+    driver_warmups[0] = g_thread_new("egl-preload", warm_egl_drivers, NULL);
+    char *hwdec = mpv_get_property_string(p->mpv, "options/hwdec");
+    if (hwdec_names_cuda(hwdec))
+        driver_warmups[1] = g_thread_new("cuda-preload", warm_cuda, NULL);
+    mpv_free(hwdec);
+}
+
+/* Libraries must not be unloaded, nor the process exit, mid-preload. */
+static void finish_driver_warmups(void)
+{
+    for (gsize i = 0; i < G_N_ELEMENTS(driver_warmups); ++i)
+        if (driver_warmups[i])
+            g_thread_join(g_steal_pointer(&driver_warmups[i]));
+}
+
 static void use_bundled_icons(void)
 {
-    GtkIconTheme *theme = gtk_icon_theme_get_for_display(gdk_display_get_default());
+    GdkDisplay *display = gdk_display_get_default();
     /* Configure the shared database before GTK creates any widgets. Adding
      * resources alone still indexes the user's entire filesystem icon theme.
      * An empty search path keeps all icon lookups inside our executable and
@@ -4295,8 +4368,25 @@ static void use_bundled_icons(void)
         "/org/gtk/libgtk/icons/",
         NULL
     };
-    gtk_icon_theme_set_search_path(theme, search_paths);
-    gtk_icon_theme_set_resource_path(theme, resource_paths);
+    /* GTK creates the display's theme lazily and immediately indexes the
+     * desktop icon theme on a worker thread. Changing the paths afterwards
+     * has to wait for that scan whenever the worker gets there first, which
+     * costs hundreds of milliseconds with large themes. Register an already
+     * configured theme under GTK's own key so no filesystem scan ever starts.
+     * If GTK stops honouring the key, the paths are applied the usual way. */
+    if (!g_object_get_data(G_OBJECT(display), "gtk-icon-theme")) {
+        GtkIconTheme *bundled = gtk_icon_theme_new();
+        gtk_icon_theme_set_search_path(bundled, search_paths);
+        gtk_icon_theme_set_resource_path(bundled, resource_paths);
+        g_object_set_data(G_OBJECT(display), "gtk-icon-theme", bundled);
+        g_object_set(bundled, "display", display, NULL);
+    }
+    GtkIconTheme *theme = gtk_icon_theme_get_for_display(display);
+    g_auto(GStrv) current_paths = gtk_icon_theme_get_search_path(theme);
+    if (current_paths && current_paths[0]) {
+        gtk_icon_theme_set_search_path(theme, search_paths);
+        gtk_icon_theme_set_resource_path(theme, resource_paths);
+    }
     /* Symbolic icons still inherit GTK's CSS colors and the user's accent.
      * Neither GtkSettings nor the desktop's icon theme is changed. */
     gtk_window_set_default_icon_name(APP_ICON_NAME);
@@ -4899,6 +4989,8 @@ int main(int argc, char **argv)
         return 1;
     }
     startup_trace_mark("configuration loaded");
+    if (files && files[0])
+        warm_drivers(&p);
     p.pending = g_ptr_array_new_with_free_func(g_free);
     if (files) {
         for (int i = 0; files[i]; ++i) {
@@ -4919,6 +5011,7 @@ int main(int argc, char **argv)
     gboolean gtk_initialized = gtk_init_check();
     gl_api_environment_end(&gl_environment);
     if (!gtk_initialized) {
+        finish_driver_warmups();
         g_printerr("mpv-gtk: could not connect to the Wayland session\n");
         mpv_terminate_destroy(p.mpv);
         if (p.gl_library) dlclose(p.gl_library);
@@ -4944,6 +5037,7 @@ int main(int argc, char **argv)
     startup_trace_mark("GTK application run entered");
     int status = g_application_run(G_APPLICATION(p.application), 1, argv);
     startup_trace_mark("GTK application loop finished");
+    finish_driver_warmups();
     p.closing = TRUE;
     if (p.initial_queue_sort_source) g_source_remove(p.initial_queue_sort_source);
     release_queue_view(&p);

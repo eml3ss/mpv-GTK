@@ -27,6 +27,13 @@ holds video output initialization until GTK has created the shared GL context
 and Render API. The application releases the hook and presents the window once
 the media has loaded.
 
+File launches also load the EGL vendor drivers on a worker thread while GTK
+initializes, and CUDA as well when `hwdec` explicitly names NVDEC or CUDA, so
+the main thread does not pay for them when it creates the GL context and the
+renderer. The display's icon theme is registered already restricted to the
+bundled resources, so GTK never starts indexing the desktop icon theme.
+`MPV_GTK_STARTUP_TRACE=1` prints the timing of each startup stage.
+
 Configuration defaults to `~/.config/mpv-gtk/`, or
 `$XDG_CONFIG_HOME/mpv-gtk` when that variable is set. This directory contains
 `mpv.conf`, `input.conf`, `interface.conf`, scripts, and
