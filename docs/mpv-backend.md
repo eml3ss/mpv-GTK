@@ -34,6 +34,10 @@ renderer. The display's icon theme is registered already restricted to the
 bundled resources, so GTK never starts indexing the desktop icon theme.
 `MPV_GTK_STARTUP_TRACE=1` prints the timing of each startup stage.
 
+A `GTK_THEME` variable inherited from the launching program is ignored when it
+names a theme without a GTK 4 version, so the player keeps the desktop theme
+instead of GTK's built-in fallback style.
+
 Configuration defaults to `~/.config/mpv-gtk/`, or
 `$XDG_CONFIG_HOME/mpv-gtk` when that variable is set. This directory contains
 `mpv.conf`, `input.conf`, `interface.conf`, scripts, and

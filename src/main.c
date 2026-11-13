@@ -4355,6 +4355,47 @@ static void finish_driver_warmups(void)
             g_thread_join(g_steal_pointer(&driver_warmups[i]));
 }
 
+static gboolean theme_directory_has_gtk4(const char *base, const char *name)
+{
+    g_autofree char *path = g_build_filename(base, name, NULL);
+    g_autoptr(GDir) directory = g_dir_open(path, 0, NULL);
+    const char *entry;
+    while (directory && (entry = g_dir_read_name(directory)))
+        if (g_str_has_prefix(entry, "gtk-4."))
+            return TRUE;
+    return FALSE;
+}
+
+/* Launchers can leak another program's GTK_THEME into this process, for
+ * example a browser started with a GTK 3-only theme. GTK 4 then silently
+ * falls back to its built-in light style instead of the desktop theme.
+ * Keep the override only when it names a theme GTK 4 can actually load. */
+static void drop_unusable_theme_override(void)
+{
+    const char *override = g_getenv("GTK_THEME");
+    if (!override || !*override)
+        return;
+    g_autofree char *name = g_strdup(override);
+    char *variant = strchr(name, ':');
+    if (variant)
+        *variant = '\0';
+    static const char *const builtin[] = {"Adwaita", "HighContrast", "HighContrastInverse",
+                                          "Default", "Empty", NULL};
+    if (!*name || g_strv_contains(builtin, name))
+        return;
+    g_autofree char *user_themes = g_build_filename(g_get_user_data_dir(), "themes", NULL);
+    g_autofree char *home_themes = g_build_filename(g_get_home_dir(), ".themes", NULL);
+    gboolean found = theme_directory_has_gtk4(user_themes, name) ||
+        theme_directory_has_gtk4(home_themes, name);
+    const char *const *system = g_get_system_data_dirs();
+    for (gsize i = 0; !found && system[i]; ++i) {
+        g_autofree char *themes = g_build_filename(system[i], "themes", NULL);
+        found = theme_directory_has_gtk4(themes, name);
+    }
+    if (!found)
+        g_unsetenv("GTK_THEME");
+}
+
 static void use_bundled_icons(void)
 {
     GdkDisplay *display = gdk_display_get_default();
@@ -5007,6 +5048,7 @@ int main(int argc, char **argv)
     gdk_set_allowed_backends("wayland");
     p.default_gsk_renderer = g_getenv("GSK_RENDERER") == NULL;
     g_setenv("GSK_RENDERER", "opengl", FALSE);
+    drop_unusable_theme_override();
     startup_trace_mark("GTK initialization started");
     gboolean gtk_initialized = gtk_init_check();
     gl_api_environment_end(&gl_environment);
