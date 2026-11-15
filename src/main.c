@@ -119,7 +119,8 @@ static const ObservedProperty playback_properties[] = {
     {"audio-params/samplerate", MPV_FORMAT_INT64},
     {"audio-params/hr-channels", MPV_FORMAT_STRING},
     {"frame-drop-count", MPV_FORMAT_INT64}, {"decoder-frame-drop-count", MPV_FORMAT_INT64},
-    {"avsync", MPV_FORMAT_DOUBLE}, {"demuxer-cache-duration", MPV_FORMAT_DOUBLE}
+    {"avsync", MPV_FORMAT_DOUBLE}, {"demuxer-cache-duration", MPV_FORMAT_DOUBLE},
+    {"file-size", MPV_FORMAT_INT64}
 };
 
 static const ObservedProperty preferences_properties[] = {
@@ -164,13 +165,13 @@ G_STATIC_ASSERT(G_N_ELEMENTS(playlist_preference_offsets) ==
 
 typedef struct {
     char *video_codec, *video_format, *audio_codec, *channels;
-    int64_t width, height, sample_rate, dropped, decoder_dropped;
+    int64_t width, height, sample_rate, dropped, decoder_dropped, file_size;
     double fps, avsync, cache;
     gboolean avsync_known, drops_known, decoder_drops_known;
 } PlaybackValues;
 
 typedef struct {
-    GtkWidget *title, *video, *decoder, *context, *audio, *drops, *sync, *cache, *cache_row;
+    GtkWidget *title, *size, *video, *decoder, *context, *audio, *drops, *sync, *cache, *cache_row;
 } PlaybackInfoView;
 
 typedef struct {
@@ -1436,6 +1437,7 @@ static gboolean playback_property_changed(Player *p, mpv_event_property *propert
     else if (g_str_equal(name, "video-params/w")) integer = &p->playback.width;
     else if (g_str_equal(name, "video-params/h")) integer = &p->playback.height;
     else if (g_str_equal(name, "audio-params/samplerate")) integer = &p->playback.sample_rate;
+    else if (g_str_equal(name, "file-size")) integer = &p->playback.file_size;
     else if (g_str_equal(name, "frame-drop-count")) {
         integer = &p->playback.dropped;
         p->playback.drops_known = available;
@@ -3328,12 +3330,47 @@ static GtkWidget *info_row(GtkBox *content, const char *name, GtkWidget **value)
     return row;
 }
 
+/* Decimal units, as GTK file choosers show them; the interface language
+ * chooses the unit names rather than the system locale. */
+static char *format_file_size(int64_t bytes)
+{
+    static const char *const units[] = {"КБ", "МБ", "ГБ", "ТБ"};
+    if (bytes < 1000)
+        return g_strdup_printf("%" G_GINT64_FORMAT " %s", bytes, tr("Б"));
+    double value = bytes / 1000.0;
+    guint unit = 0;
+    while (value >= 999.95 && unit + 1 < G_N_ELEMENTS(units)) {
+        value /= 1000.0;
+        ++unit;
+    }
+    char number[G_ASCII_DTOSTR_BUF_SIZE];
+    g_ascii_formatd(number, sizeof(number), "%.1f", value);
+    return g_strdup_printf("%s %s", number, tr(units[unit]));
+}
+
 static void update_info_view(Player *p, PlaybackInfoView *view)
 {
     gboolean loaded = p->timeline.loaded;
     PlaybackValues *v = &p->playback;
     gtk_label_set_text(GTK_LABEL(view->title), loaded
         ? gtk_label_get_text(GTK_LABEL(p->title)) : tr("Нет открытого файла"));
+    g_autofree char *size = loaded && v->file_size > 0 ? format_file_size(v->file_size) : NULL;
+    gtk_label_set_text(GTK_LABEL(view->size), size ? size : "—");
+    if (size) {
+        /* LC_NUMERIC stays "C" for libmpv, so group the digits here. */
+        g_autofree char *digits = g_strdup_printf("%" G_GINT64_FORMAT, v->file_size);
+        GString *grouped = g_string_new(NULL);
+        for (gsize i = 0, length = strlen(digits); i < length; ++i) {
+            if (i && (length - i) % 3 == 0)
+                g_string_append(grouped, "\u2009");
+            g_string_append_c(grouped, digits[i]);
+        }
+        g_autofree char *exact = g_strdup_printf("%s %s", grouped->str, tr("байт"));
+        g_string_free(grouped, TRUE);
+        gtk_widget_set_tooltip_text(view->size, exact);
+    } else {
+        gtk_widget_set_tooltip_text(view->size, NULL);
+    }
     g_autofree char *codec = v->video_format ? g_ascii_strup(v->video_format, -1) : g_strdup("—");
     g_autofree char *video = NULL;
     if (loaded && v->width > 0 && v->height > 0) {
@@ -3398,6 +3435,7 @@ static GtkWidget *build_info_view(PlaybackInfoView *view, gboolean overlay)
     gtk_label_set_ellipsize(GTK_LABEL(view->title), PANGO_ELLIPSIZE_MIDDLE);
     gtk_widget_set_margin_bottom(view->title, 10);
     gtk_box_append(GTK_BOX(content), view->title);
+    info_row(GTK_BOX(content), "Размер файла", &view->size);
     info_row(GTK_BOX(content), "Видео", &view->video);
     info_row(GTK_BOX(content), "Декодер", &view->decoder);
     info_row(GTK_BOX(content), "Контекст", &view->context);
@@ -3407,7 +3445,7 @@ static GtkWidget *build_info_view(PlaybackInfoView *view, gboolean overlay)
     view->cache_row = info_row(GTK_BOX(content), "Буфер", &view->cache);
     if (overlay) {
         gtk_widget_set_can_target(content, FALSE);
-        GtkWidget *values[] = {view->video, view->decoder, view->context, view->audio,
+        GtkWidget *values[] = {view->size, view->video, view->decoder, view->context, view->audio,
                               view->drops, view->sync, view->cache};
         for (guint i = 0; i < G_N_ELEMENTS(values); ++i)
             gtk_label_set_selectable(GTK_LABEL(values[i]), FALSE);

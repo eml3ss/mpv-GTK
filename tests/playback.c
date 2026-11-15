@@ -154,9 +154,28 @@ static void refresh_playback(PlaybackMedia *media)
     }
 }
 
+static void check_file_size_format(void)
+{
+    g_autofree char *bytes = format_file_size(999);
+    g_autofree char *kilo = format_file_size(1500);
+    g_autofree char *mega = format_file_size(7174711);
+    g_autofree char *giga = format_file_size(INT64_C(2500000000));
+    g_autofree char *rounded = format_file_size(999960);
+    g_assert_cmpstr(bytes, ==, "999 Б");
+    g_assert_cmpstr(kilo, ==, "1.5 КБ");
+    g_assert_cmpstr(mega, ==, "7.2 МБ");
+    g_assert_cmpstr(giga, ==, "2.5 ГБ");
+    g_assert_cmpstr(rounded, ==, "1.0 МБ");
+}
+
 static void check_playback(const Player *p)
 {
     const PlaybackValues *v = &p->playback;
+    char *path = mpv_get_property_string(p->mpv, "path");
+    GStatBuf status;
+    g_assert_cmpint(g_stat(path, &status), ==, 0);
+    mpv_free(path);
+    g_assert_cmpint(v->file_size, ==, (int64_t)status.st_size);
     g_assert_cmpint(v->width, ==, 320);
     g_assert_cmpint(v->height, ==, 180);
     g_assert_cmpfloat_with_epsilon(v->fps, 24, 0.000001);
@@ -298,6 +317,7 @@ int main(void)
     g_assert_cmpint(mpv_initialize(p->mpv), >=, 0);
     g_assert_cmpint(mpv_request_log_messages(p->mpv, "error"), >=, 0);
 
+    check_file_size_format();
     load_playback(&media, filename);
     refresh_playback(&media);
     check_playback(p);
@@ -322,6 +342,6 @@ int main(void)
     g_free(p->audio_output);
     g_free(p->audio_device);
     g_assert_cmpint(unlink(filename), ==, 0);
-    puts("PASS playback metadata: real async schema, MPEG-4/AAC parameters, active decoder, identical-file reload after cache reset");
+    puts("PASS playback metadata: real async schema, file size, MPEG-4/AAC parameters, active decoder, identical-file reload after cache reset");
     return 0;
 }
