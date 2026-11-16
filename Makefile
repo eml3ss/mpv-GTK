@@ -13,7 +13,6 @@ PACKAGES := gtk4 mpv epoxy
 CPPFLAGS += $(shell $(PKG_CONFIG) --cflags $(PACKAGES))
 CFLAGS ?= -O2 -g
 CFLAGS += -std=c11 -Wall -Wextra -Wpedantic
-LDFLAGS += -Wl,-rpath,'$$ORIGIN'
 LDLIBS += $(shell $(PKG_CONFIG) --libs $(PACKAGES)) -lm -ldl
 
 TARGET := build/mpv-gtk
@@ -25,11 +24,7 @@ COMMON_SOURCES := src/config.c src/preferences.c src/transport.c src/i18n.c src/
 COMMON_OBJECTS := build/mpv-gtk-resources.o
 ICON_RESOURCE_FILES := $(wildcard data/icons/scalable/actions/*.svg data/icons/scalable/apps/*.svg) data/icons/LICENSE.GPL3 data/icons/NOTICE.txt data/icons/SOURCES.tsv
 HEADERS := src/timeline.h src/config.h src/preferences.h src/controls.h src/transport.h src/i18n.h src/input.h src/key_commands.h src/keybindings.h src/keys_page.h src/about.h src/startup_trace.h src/gl_api.h src/chapters.h src/chapter_marks.h src/track_notice.h src/trim.h src/trim_backend.h src/trim_export.h src/mp4_titles.h src/seek_preview.h src/preview_decoder.h src/mpris.h src/mpris_art.h src/audio_scrub.h src/queue_model.h src/queue_view.h
-STOCK_LIB := build/libmpv.so.2
-STOCK_ENGINE := build/mpv-engine
-STOCK_DATA := build/stock-mpv.json build/stock-mpv-version.txt
 STOCK_LICENSES := $(wildcard tools/stock-mpv-licenses/*)
-STOCK_SOURCES := $(shell $(PKG_CONFIG) --variable=libdir mpv)/libmpv.so.2 $(shell command -v mpv)
 EMBEDDED_ENGINE_TEST := build/test-embedded-engine
 TIMELINE_TEST := build/test-timeline
 CONFIG_TEST := build/test-config
@@ -70,7 +65,7 @@ DESKTOP := build/io.github.emless.mpvgtk.desktop
 
 .PHONY: all clean test test-trim test-trim-native test-trim-titles test-trim-keyframes test-trim-keyframe-render test-seek-preview test-mpris test-mpris-art test-queue-model test-queue-view install uninstall FORCE
 
-all: $(TARGET) $(CONFIG) $(INPUT_CONFIG) $(LOCALE_RESOURCE) $(TRIM_CONFIG) $(STOCK_LIB) $(STOCK_ENGINE) $(STOCK_DATA)
+all: $(TARGET) $(CONFIG) $(INPUT_CONFIG) $(LOCALE_RESOURCE) $(TRIM_CONFIG)
 
 $(TARGET): | $(TRIM_CONFIG)
 
@@ -90,13 +85,10 @@ build/mpv-gtk-resources.c: data/mpv-gtk.gresource.xml $(ICON_RESOURCE_FILES) | b
 build/mpv-gtk-resources.o: build/mpv-gtk-resources.c
 	$(CC) $(CPPFLAGS) $(CFLAGS) -Wno-overlength-strings -c -o "$@" "$<"
 
-$(TARGET): $(STOCK_LIB) src/main.c $(COMMON_SOURCES) $(COMMON_OBJECTS) $(HEADERS) | build
+$(TARGET): src/main.c $(COMMON_SOURCES) $(COMMON_OBJECTS) $(HEADERS) | build
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -o "$@" src/main.c $(COMMON_SOURCES) $(COMMON_OBJECTS) $(LDLIBS)
 
-$(STOCK_LIB) $(STOCK_ENGINE) $(STOCK_DATA) &: tools/stage-stock-mpv.sh $(STOCK_LICENSES) $(STOCK_SOURCES) | build
-	bash tools/stage-stock-mpv.sh
-
-$(EMBEDDED_ENGINE_TEST): tests/embedded_engine.c src/main.c $(COMMON_SOURCES) $(COMMON_OBJECTS) $(HEADERS) $(STOCK_LIB) | build
+$(EMBEDDED_ENGINE_TEST): tests/embedded_engine.c src/main.c $(COMMON_SOURCES) $(COMMON_OBJECTS) $(HEADERS) | build
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -o "$@" "$<" $(COMMON_SOURCES) $(COMMON_OBJECTS) $(LDLIBS)
 
 $(STARTUP_TEST): tests/startup.c src/main.c $(COMMON_SOURCES) $(COMMON_OBJECTS) $(HEADERS) | build
@@ -153,10 +145,10 @@ $(DECODER_TEST): tests/decoder.c src/main.c $(COMMON_SOURCES) $(COMMON_OBJECTS) 
 $(PLAYBACK_TEST): tests/playback.c src/main.c $(COMMON_SOURCES) $(COMMON_OBJECTS) $(HEADERS) | build
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -o "$@" "$<" $(COMMON_SOURCES) $(COMMON_OBJECTS) $(LDLIBS)
 
-$(AUTOPLAYLIST_TEST): tests/autoplaylist.c src/main.c $(COMMON_SOURCES) $(COMMON_OBJECTS) $(HEADERS) $(STOCK_LIB) | build
+$(AUTOPLAYLIST_TEST): tests/autoplaylist.c src/main.c $(COMMON_SOURCES) $(COMMON_OBJECTS) $(HEADERS) | build
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -o "$@" "$<" $(COMMON_SOURCES) $(COMMON_OBJECTS) $(LDLIBS)
 
-$(WATCH_LATER_TEST): tests/watch_later.c src/main.c $(COMMON_SOURCES) $(COMMON_OBJECTS) $(HEADERS) $(STOCK_LIB) | build $(LOCALE_RESOURCE)
+$(WATCH_LATER_TEST): tests/watch_later.c src/main.c $(COMMON_SOURCES) $(COMMON_OBJECTS) $(HEADERS) | build $(LOCALE_RESOURCE)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -o "$@" "$<" $(COMMON_SOURCES) $(COMMON_OBJECTS) $(LDLIBS)
 
 $(INPUT_TEST): tests/input.c src/input.c src/input.h | build
@@ -192,7 +184,7 @@ $(DESKTOP): data/io.github.emless.mpvgtk.desktop.in FORCE | build
 		desktop-file-validate "$@"; \
 	fi
 
-$(TRIM_NATIVE_TEST): tests/trim_native.c src/trim_export.c src/trim_export.h src/mp4_titles.c src/mp4_titles.h $(STOCK_LIB) | build
+$(TRIM_NATIVE_TEST): tests/trim_native.c src/trim_export.c src/trim_export.h src/mp4_titles.c src/mp4_titles.h | build
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -o "$@" tests/trim_native.c src/trim_export.c src/mp4_titles.c $(shell $(PKG_CONFIG) --libs gio-2.0 mpv) -lm
 
 test-trim-native: $(TRIM_NATIVE_TEST)
@@ -200,7 +192,7 @@ test-trim-native: $(TRIM_NATIVE_TEST)
 	if [ "$$status" -eq 77 ]; then printf '%s\n' 'Native Trim Mode check skipped (FFmpeg unavailable).'; \
 	elif [ "$$status" -ne 0 ]; then exit "$$status"; fi
 
-$(TRIM_TITLES_TEST): tests/trim_titles.c src/trim_export.c src/trim_export.h src/mp4_titles.c src/mp4_titles.h $(STOCK_LIB) | build
+$(TRIM_TITLES_TEST): tests/trim_titles.c src/trim_export.c src/trim_export.h src/mp4_titles.c src/mp4_titles.h | build
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -o "$@" tests/trim_titles.c src/trim_export.c src/mp4_titles.c $(shell $(PKG_CONFIG) --libs gio-2.0 mpv) -lm
 
 test-trim-titles: $(TRIM_TITLES_TEST)
@@ -208,7 +200,7 @@ test-trim-titles: $(TRIM_TITLES_TEST)
 	if [ "$$status" -eq 77 ]; then printf '%s\n' 'Trim title check skipped (FFmpeg tools unavailable).'; \
 	elif [ "$$status" -ne 0 ]; then exit "$$status"; fi
 
-$(TRIM_KEYFRAME_TEST): tests/trim_keyframes.c src/trim_backend.c src/trim_backend.h src/trim_export.c src/trim_export.h src/mp4_titles.c src/mp4_titles.h src/keybindings.h $(STOCK_LIB) | build
+$(TRIM_KEYFRAME_TEST): tests/trim_keyframes.c src/trim_backend.c src/trim_backend.h src/trim_export.c src/trim_export.h src/mp4_titles.c src/mp4_titles.h src/keybindings.h | build
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -o "$@" tests/trim_keyframes.c src/trim_backend.c src/trim_export.c src/mp4_titles.c $(shell $(PKG_CONFIG) --libs gio-2.0 mpv) -lm
 
 test-trim-keyframes: $(TRIM_KEYFRAME_TEST)
@@ -216,7 +208,7 @@ test-trim-keyframes: $(TRIM_KEYFRAME_TEST)
 	if [ "$$status" -eq 77 ]; then printf '%s\n' 'Trim keyframe check skipped (FFmpeg tools unavailable).'; \
 	elif [ "$$status" -ne 0 ]; then exit "$$status"; fi
 
-$(TRIM_RENDER_TEST): tests/trim_keyframe_render.c tests/trim_keyframes.c src/trim_backend.c src/trim_backend.h src/trim_export.c src/trim_export.h src/mp4_titles.c src/mp4_titles.h src/keybindings.h $(STOCK_LIB) | build
+$(TRIM_RENDER_TEST): tests/trim_keyframe_render.c tests/trim_keyframes.c src/trim_backend.c src/trim_backend.h src/trim_export.c src/trim_export.h src/mp4_titles.c src/mp4_titles.h src/keybindings.h | build
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -o "$@" tests/trim_keyframe_render.c src/trim_backend.c src/trim_export.c src/mp4_titles.c $(shell $(PKG_CONFIG) --libs gio-2.0 mpv) -lm
 
 test-trim-keyframe-render: $(TRIM_RENDER_TEST)
@@ -224,7 +216,7 @@ test-trim-keyframe-render: $(TRIM_RENDER_TEST)
 	if [ "$$status" -eq 77 ]; then printf '%s\n' 'Trim render check skipped (FFmpeg tools or software Render API unavailable).'; \
 	elif [ "$$status" -ne 0 ]; then exit "$$status"; fi
 
-$(SEEK_PREVIEW_TEST): tests/seek_preview.c src/seek_preview.c src/seek_preview.h src/preview_decoder.c src/preview_decoder.h src/i18n.c src/i18n.h $(STOCK_LIB) | build $(LOCALE_RESOURCE)
+$(SEEK_PREVIEW_TEST): tests/seek_preview.c src/seek_preview.c src/seek_preview.h src/preview_decoder.c src/preview_decoder.h src/i18n.c src/i18n.h | build $(LOCALE_RESOURCE)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -o "$@" tests/seek_preview.c src/seek_preview.c src/preview_decoder.c src/i18n.c $(LDLIBS)
 
 test-seek-preview: $(SEEK_PREVIEW_TEST)
@@ -232,7 +224,7 @@ test-seek-preview: $(SEEK_PREVIEW_TEST)
 	if [ "$$status" -eq 77 ]; then printf '%s\n' 'Timeline preview check skipped (no usable Wayland display or FFmpeg).'; \
 	elif [ "$$status" -ne 0 ]; then exit "$$status"; fi
 
-$(MPRIS_TEST): tests/mpris.c src/mpris.c src/mpris.h $(STOCK_LIB) | build
+$(MPRIS_TEST): tests/mpris.c src/mpris.c src/mpris.h | build
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -o "$@" tests/mpris.c src/mpris.c $(shell $(PKG_CONFIG) --libs gio-2.0 mpv) -lm
 
 test-mpris: $(MPRIS_TEST)
@@ -240,7 +232,7 @@ test-mpris: $(MPRIS_TEST)
 	if [ "$$status" -eq 77 ]; then printf '%s\n' 'MPRIS check skipped (FFmpeg or private D-Bus unavailable).'; \
 	elif [ "$$status" -ne 0 ]; then exit "$$status"; fi
 
-$(MPRIS_ART_TEST): tests/mpris_art.c src/mpris_art.c src/mpris_art.h src/preview_decoder.c src/preview_decoder.h $(COMMON_OBJECTS) $(STOCK_LIB) | build
+$(MPRIS_ART_TEST): tests/mpris_art.c src/mpris_art.c src/mpris_art.h src/preview_decoder.c src/preview_decoder.h $(COMMON_OBJECTS) | build
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -o "$@" tests/mpris_art.c src/mpris_art.c src/preview_decoder.c $(COMMON_OBJECTS) $(shell $(PKG_CONFIG) --libs gio-2.0 gdk-pixbuf-2.0 mpv) -lm
 
 test-mpris-art: $(MPRIS_ART_TEST)
@@ -248,7 +240,7 @@ test-mpris-art: $(MPRIS_ART_TEST)
 	if [ "$$status" -eq 77 ]; then printf '%s\n' 'MPRIS artwork check skipped (FFmpeg unavailable).'; \
 	elif [ "$$status" -ne 0 ]; then exit "$$status"; fi
 
-$(QUEUE_MODEL_TEST): tests/queue_model.c src/queue_model.c src/queue_model.h $(STOCK_LIB) | build
+$(QUEUE_MODEL_TEST): tests/queue_model.c src/queue_model.c src/queue_model.h | build
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -Isrc -o "$@" tests/queue_model.c src/queue_model.c $(shell $(PKG_CONFIG) --libs gio-2.0 mpv) -lm
 
 test-queue-model: $(QUEUE_MODEL_TEST)
@@ -256,7 +248,7 @@ test-queue-model: $(QUEUE_MODEL_TEST)
 	if [ "$$status" -eq 77 ]; then printf '%s\n' 'Queue editor check skipped (FFmpeg tools unavailable).'; \
 	elif [ "$$status" -ne 0 ]; then exit "$$status"; fi
 
-$(QUEUE_VIEW_TEST): tests/queue_view.c tests/queue_model.c src/queue_view.c src/queue_view.h src/queue_model.c src/queue_model.h src/i18n.c src/i18n.h $(STOCK_LIB) | build $(LOCALE_RESOURCE)
+$(QUEUE_VIEW_TEST): tests/queue_view.c tests/queue_model.c src/queue_view.c src/queue_view.h src/queue_model.c src/queue_model.h src/i18n.c src/i18n.h | build $(LOCALE_RESOURCE)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -Isrc -o "$@" tests/queue_view.c src/queue_view.c src/queue_model.c src/i18n.c $(LDLIBS)
 
 test-queue-view: $(QUEUE_VIEW_TEST)
@@ -273,7 +265,7 @@ test-trim: all test-trim-native test-trim-titles test-trim-keyframes test-trim-k
 		printf '%s\n' 'Trim Mode integration check skipped (no usable display or FFmpeg).'; \
 	elif [ "$$status" -ne 0 ]; then exit "$$status"; fi
 
-test: $(TARGET) $(CONFIG) $(INPUT_CONFIG) $(TIMELINE_TEST) $(CONFIG_TEST) $(CONTROLS_TEST) $(CURSOR_TIMEOUT_TEST) $(LOCALE_TEST) $(RENDER_TEST) $(PREFERENCES_TEST) $(PREFERENCES_UI_TEST) $(SCRUB_TEST) $(I18N_TEST) $(DECODER_TEST) $(PLAYBACK_TEST) $(AUTOPLAYLIST_TEST) $(INPUT_TEST) $(KEY_COMMANDS_TEST) $(KEYBINDINGS_TEST) $(KEYS_INTEGRATION_TEST) $(KEYS_PAGE_UI_TEST) $(CHAPTERS_TEST) $(CHAPTERS_INTEGRATION_TEST) $(CHAPTER_MARKS_TEST) $(LAZY_RESOURCES_TEST) $(STARTUP_TEST) $(GL_API_TEST) $(GL_STARTUP_TEST) $(EMBEDDED_ENGINE_TEST) $(STOCK_LIB) $(STOCK_ENGINE) $(STOCK_DATA) $(WATCH_LATER_TEST)
+test: $(TARGET) $(CONFIG) $(INPUT_CONFIG) $(TIMELINE_TEST) $(CONFIG_TEST) $(CONTROLS_TEST) $(CURSOR_TIMEOUT_TEST) $(LOCALE_TEST) $(RENDER_TEST) $(PREFERENCES_TEST) $(PREFERENCES_UI_TEST) $(SCRUB_TEST) $(I18N_TEST) $(DECODER_TEST) $(PLAYBACK_TEST) $(AUTOPLAYLIST_TEST) $(INPUT_TEST) $(KEY_COMMANDS_TEST) $(KEYBINDINGS_TEST) $(KEYS_INTEGRATION_TEST) $(KEYS_PAGE_UI_TEST) $(CHAPTERS_TEST) $(CHAPTERS_INTEGRATION_TEST) $(CHAPTER_MARKS_TEST) $(LAZY_RESOURCES_TEST) $(STARTUP_TEST) $(GL_API_TEST) $(GL_STARTUP_TEST) $(EMBEDDED_ENGINE_TEST) $(WATCH_LATER_TEST)
 	./$(TIMELINE_TEST)
 	./$(CONFIG_TEST)
 	./$(CONTROLS_TEST)
@@ -333,12 +325,10 @@ test: $(TARGET) $(CONFIG) $(INPUT_CONFIG) $(TIMELINE_TEST) $(CONFIG_TEST) $(CONT
 		exit "$$status"; \
 	fi
 
-install: $(TARGET) $(CONFIG) $(INPUT_CONFIG) $(DESKTOP) $(LOCALE_RESOURCE) $(STOCK_LIB) $(STOCK_ENGINE) $(STOCK_DATA)
+install: $(TARGET) $(CONFIG) $(INPUT_CONFIG) $(DESKTOP) $(LOCALE_RESOURCE)
 	install -Dm755 "$(TARGET)" "$(APPDIR)/mpv-gtk"
-	install -Dm755 "$(STOCK_LIB)" "$(APPDIR)/libmpv.so.2"
-	install -Dm755 "$(STOCK_ENGINE)" "$(APPDIR)/mpv-engine"
-	install -Dm644 "build/stock-mpv.json" "$(APPDIR)/stock-mpv.json"
-	install -Dm644 "build/stock-mpv-version.txt" "$(APPDIR)/stock-mpv-version.txt"
+	# The system libmpv is used directly; remove copies staged by older versions.
+	rm -f "$(APPDIR)/libmpv.so.2" "$(APPDIR)/mpv-engine" "$(APPDIR)/stock-mpv.json" "$(APPDIR)/stock-mpv-version.txt"
 	@for license in $(STOCK_LICENSES); do install -Dm644 "$$license" "$(APPDIR)/stock-mpv-licenses/$${license##*/}"; done
 	rm -f "$(APPDIR)/libmpv-gtk-vulkan.so.2" "$(APPDIR)/libmpv-gtk-presenter.so"
 	install -Dm644 "$(LOCALE_RESOURCE)" "$(APPDIR)/locales/en.ini"
@@ -381,7 +371,7 @@ clean:
 	rm -f "$(CHAPTER_MARKS_TEST)"
 	rm -f "$(CHAPTERS_TEST)" "$(CHAPTERS_INTEGRATION_TEST)"
 	rm -f "$(KEYS_PAGE_UI_TEST)"
-	rm -f "$(STOCK_LIB)" "$(STOCK_ENGINE)" $(STOCK_DATA) "$(EMBEDDED_ENGINE_TEST)"
+	rm -f build/libmpv.so.2 build/mpv-engine build/stock-mpv.json build/stock-mpv-version.txt "$(EMBEDDED_ENGINE_TEST)"
 	rm -f "$(GL_API_TEST)" "$(GL_STARTUP_TEST)"
 	rm -f "$(STARTUP_TEST)"
 	rm -f "$(TARGET)" "$(TIMELINE_TEST)" "$(CONFIG_TEST)" "$(CONTROLS_TEST)" "$(CURSOR_TIMEOUT_TEST)" "$(LOCALE_TEST)" "$(RENDER_TEST)" "$(PREFERENCES_TEST)" "$(PREFERENCES_UI_TEST)" "$(SCRUB_TEST)" "$(I18N_TEST)" "$(DECODER_TEST)" "$(PLAYBACK_TEST)" "$(INPUT_TEST)" "$(KEY_COMMANDS_TEST)" "$(KEYBINDINGS_TEST)" "$(KEYS_INTEGRATION_TEST)" "$(LAZY_RESOURCES_TEST)" "$(LOCALE_RESOURCE)" "$(DESKTOP)"

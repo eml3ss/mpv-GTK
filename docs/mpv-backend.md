@@ -1,10 +1,9 @@
 # Stock libmpv in a single GTK window
 
-The player uses the official C API of an unmodified `libmpv.so.2`.
-Copies of the installed library and mpv executable are staged beside the
-application. Their versions, source paths, and SHA-256 hashes are recorded in
-`stock-mpv.json`. The `$ORIGIN` RUNPATH selects the staged library. The system
-installation of mpv is unchanged.
+The player uses the official C API of the system's unmodified libmpv. It
+links against the stable `libmpv.so.2` soname found through pkg-config and is
+not tied to a particular mpv, FFmpeg, or libplacebo release: distribution
+updates of those packages take effect without rebuilding the player.
 
 ## Video integration
 
