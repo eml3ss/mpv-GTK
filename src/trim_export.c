@@ -32,7 +32,8 @@ typedef struct {
 typedef enum { OP_PREPARE, OP_SEAL, OP_COMMIT, OP_ROLLBACK,
                OP_CLEAN_SUCCESS, OP_CLEAN_FAILURE } FileOperation;
 typedef enum { PROCESS_EXPORT, PROCESS_PROBE, PROCESS_FRAME,
-               PROCESS_ANALYZE, PROCESS_HEAD, PROCESS_TAIL, PROCESS_SPLICE } ProcessStage;
+               PROCESS_ANALYZE, PROCESS_PACKETS, PROCESS_HEAD, PROCESS_TAIL, PROCESS_ENDING,
+               PROCESS_SPLICE, PROCESS_SPLICE_END } ProcessStage;
 
 typedef struct ExportJob {
     gint references;
@@ -40,12 +41,14 @@ typedef struct ExportJob {
     char *input, *source, *directory, *workspace, *temp, *backup, *target, *output;
     char *ffmpeg, *ffprobe, *phase, *failure, *open_path, *idle, *force_window;
     char *extension, *renamed; /* Audio-only container; replacement saved under a new name. */
-    /* Frame-accurate start ("smart cut"): a re-encoded head up to the splice
-     * keyframe, a stream-copied tail, and the remaining source streams. */
+    /* Frame-accurate cuts ("smart cut"): a re-encoded head up to the first
+     * keyframe, a stream-copied middle ("tail") up to the last keyframe, a
+     * re-encoded ending, and the remaining source streams. */
     TrimPreciseMode precise;
-    gint64 splice_ms, video_index;
+    gint64 splice_ms, end_splice_ms, video_index, tail_packets;
+    double start_time, ending_start;
     gboolean smart;
-    char *codec, *pix_fmt, *profile, *rotation, *head, *tail, *list;
+    char *codec, *pix_fmt, *profile, *rotation, *head, *tail, *ending, *list;
     const char *encoders[3];
     guint encoder_count, encoder_index;
     const char *precise_result; /* "", "cpu", "gpu" or "fallback". */
@@ -145,7 +148,7 @@ static void job_unref(ExportJob *j)
     g_free(j->open_path); g_free(j->idle); g_free(j->force_window);
     g_free(j->extension); g_free(j->renamed);
     g_free(j->codec); g_free(j->pix_fmt); g_free(j->profile); g_free(j->rotation);
-    g_free(j->head); g_free(j->tail); g_free(j->list);
+    g_free(j->head); g_free(j->tail); g_free(j->ending); g_free(j->list);
     g_clear_pointer(&j->excluded_audio, g_array_unref);
     g_free(j);
 }
@@ -335,6 +338,7 @@ static gboolean prepare_files(ExportJob *j, GError **error)
     j->backup = g_build_filename(j->workspace, backup_name, NULL);
     j->head = g_build_filename(j->workspace, "head.ts", NULL);
     j->tail = g_build_filename(j->workspace, "tail.ts", NULL);
+    j->ending = g_build_filename(j->workspace, "ending.ts", NULL);
     j->list = g_build_filename(j->workspace, "parts.ffconcat", NULL);
     return TRUE;
 }
@@ -461,7 +465,7 @@ static gboolean rollback_files(ExportJob *j, GError **error)
 
 static void remove_parts(ExportJob *j)
 {
-    const char *parts[] = {j->head, j->tail, j->list};
+    const char *parts[] = {j->head, j->tail, j->ending, j->list};
     for (gsize i = 0; i < G_N_ELEMENTS(parts); ++i)
         if (parts[i]) unlink(parts[i]);
 }
@@ -940,14 +944,85 @@ static void fall_back_to_keyframe(TrimExport *e)
     begin_process(e, PROCESS_EXPORT);
 }
 
+/* Parts: head [start, splice) re-encoded; tail [splice, end_splice) copied,
+ * or to the end of the file when end_splice is -1; ending from the last
+ * copied frame to the end, re-encoded. splice == end re-encodes it all. */
+static gboolean has_head(const ExportJob *j) { return j->splice_ms > j->start_ms; }
+static gboolean has_tail(const ExportJob *j) { return j->splice_ms < j->end_ms; }
+static gboolean has_ending(const ExportJob *j)
+{
+    return has_tail(j) && j->end_splice_ms >= 0 && j->ending_start < j->end_ms / 1000.0 - 0.001;
+}
+
+static gboolean smart_stage_needed(const ExportJob *j, ProcessStage stage)
+{
+    switch (stage) {
+    case PROCESS_PACKETS: return has_tail(j) && j->end_splice_ms >= 0;
+    case PROCESS_HEAD: return has_head(j);
+    case PROCESS_TAIL: return has_tail(j);
+    case PROCESS_ENDING: return has_ending(j);
+    case PROCESS_EXPORT: return TRUE;
+    case PROCESS_SPLICE: return has_head(j);
+    case PROCESS_SPLICE_END: return has_ending(j);
+    default: return FALSE;
+    }
+}
+
+/* Run the first needed stage at or after `stage` in the given sequence. */
+static void continue_smart(TrimExport *e, const ProcessStage *order, gsize count, ProcessStage stage)
+{
+    ExportJob *j = e->job;
+    gsize i = 0;
+    while (i < count && order[i] != stage) ++i;
+    for (; i < count; ++i) {
+        if (!smart_stage_needed(j, order[i])) continue;
+        if (order[i] == PROCESS_EXPORT) {
+            g_autofree char *list = g_strdup_printf("ffconcat version 1.0\n%s%s%s",
+                has_head(j) ? "file 'head.ts'\n" : "", has_tail(j) ? "file 'tail.ts'\n" : "",
+                has_ending(j) ? "file 'ending.ts'\n" : "");
+            if (!g_file_set_contents(j->list, list, -1, NULL)) { fall_back_to_keyframe(e); return; }
+        }
+        begin_process(e, order[i]);
+        return;
+    }
+    validated(e);
+}
+
+static const ProcessStage parts_order[] = {
+    PROCESS_PACKETS, PROCESS_HEAD, PROCESS_TAIL, PROCESS_ENDING, PROCESS_EXPORT
+};
+static const ProcessStage checks_order[] = { PROCESS_SPLICE, PROCESS_SPLICE_END };
+
 /* An encoder that is missing or fails (no NVIDIA GPU, no VA-API device,
  * unsupported input) hands over to the next candidate, ending with the
  * software encoder and finally the keyframe export. */
 static void try_next_encoder(TrimExport *e)
 {
     ExportJob *j = e->job;
-    if (++j->encoder_index < j->encoder_count) begin_process(e, PROCESS_HEAD);
-    else fall_back_to_keyframe(e);
+    if (++j->encoder_index < j->encoder_count)
+        continue_smart(e, parts_order, G_N_ELEMENTS(parts_order), PROCESS_HEAD);
+    else
+        fall_back_to_keyframe(e);
+}
+
+static gboolean add_encode(ExportJob *j, GPtrArray *args, double from, double length, const char *output)
+{
+    const char *encoder = j->encoders[j->encoder_index];
+    g_autofree char *seek = seconds_text(from);
+    g_autofree char *duration = seconds_text(length);
+    g_autofree char *video = video_selector(j, 0);
+    add_args(args, j->ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin", "-y", NULL);
+    if (g_str_has_suffix(encoder, "_vaapi")) {
+        g_autofree char *node = render_node();
+        if (!node) return FALSE;
+        g_autofree char *device = g_strdup_printf("vaapi=va:%s", node);
+        add_args(args, "-init_hw_device", device, "-filter_hw_device", "va", NULL);
+    }
+    add_args(args, "-ss", seek, "-i", j->source, "-t", duration, "-map", video,
+             "-an", "-sn", "-dn", NULL);
+    add_encoder(j, args, encoder);
+    add_args(args, "-f", "mpegts", output, NULL);
+    return TRUE;
 }
 
 static void begin_smart_stage(TrimExport *e, ProcessStage stage)
@@ -956,42 +1031,57 @@ static void begin_smart_stage(TrimExport *e, ProcessStage stage)
     g_autoptr(GPtrArray) args = g_ptr_array_new_with_free_func(g_free);
     g_autofree char *video = video_selector(j, 0);
     double start = j->start_ms / 1000.0, splice = j->splice_ms / 1000.0, end = j->end_ms / 1000.0;
+    double end_splice = j->end_splice_ms / 1000.0;
     if (stage == PROCESS_ANALYZE) {
         publish(e, "encoding");
         g_autofree char *select = j->video_index >= 0
             ? g_strdup_printf("%" G_GINT64_FORMAT, j->video_index) : g_strdup("v:0");
         add_args(args, j->ffprobe, "-v", "error", "-select_streams", select, "-show_entries",
-                 "stream=codec_name,profile,pix_fmt:stream_side_data=rotation", "-of", "flat",
+                 "stream=codec_name,profile,pix_fmt:stream_side_data=rotation:format=start_time",
+                 "-of", "flat", j->source, NULL);
+    } else if (stage == PROCESS_PACKETS) {
+        publish(e, "encoding");
+        /* Packet order from the first to the last keyframe decides how many
+         * packets the copied middle keeps and which frame it shows last. */
+        g_autofree char *select = j->video_index >= 0
+            ? g_strdup_printf("%" G_GINT64_FORMAT, j->video_index) : g_strdup("v:0");
+        char from[G_ASCII_DTOSTR_BUF_SIZE], to[G_ASCII_DTOSTR_BUF_SIZE];
+        g_ascii_formatd(from, sizeof(from), "%.6f", j->start_time + MAX(0.0, splice - 1.0));
+        g_ascii_formatd(to, sizeof(to), "%.6f", j->start_time + end_splice + 1.0);
+        g_autofree char *interval = g_strdup_printf("%s%%%s", from, to);
+        add_args(args, j->ffprobe, "-v", "error", "-select_streams", select, "-read_intervals",
+                 interval, "-show_entries", "packet=pts_time,flags", "-of", "csv=p=0",
                  j->source, NULL);
     } else if (stage == PROCESS_HEAD) {
         publish(e, "encoding");
-        const char *encoder = j->encoders[j->encoder_index];
-        g_autofree char *seek = seconds_text(start);
         /* Stop half a millisecond early so the splice keyframe itself is
-         * taken from the copied tail, never duplicated. */
-        g_autofree char *length = seconds_text(splice - start - 0.0005);
-        add_args(args, j->ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin", "-y", NULL);
-        if (g_str_has_suffix(encoder, "_vaapi")) {
-            g_autofree char *node = render_node();
-            if (!node) { try_next_encoder(e); return; }
-            g_autofree char *device = g_strdup_printf("vaapi=va:%s", node);
-            add_args(args, "-init_hw_device", device, "-filter_hw_device", "va", NULL);
-        }
-        add_args(args, "-ss", seek, "-i", j->source, "-t", length, "-map", video,
-                 "-an", "-sn", "-dn", NULL);
-        add_encoder(j, args, encoder);
-        add_args(args, "-f", "mpegts", j->head, NULL);
+         * taken from the copied middle, never duplicated. */
+        if (!add_encode(j, args, start, splice - start - 0.0005, j->head)) { try_next_encoder(e); return; }
     } else if (stage == PROCESS_TAIL) {
         publish(e, "exporting");
         /* Seeking just past the keyframe starts the copy exactly on it.
          * Leading pictures (open-GOP RASL/B-frames) display before the
          * splice and reference the replaced frames; the head already
-         * contains them, so they are dropped. */
+         * contains them, so they are dropped. A middle that ends before the
+         * selection's end stops right before the last keyframe in decode
+         * order; the frames it cannot show come from the ending. */
         g_autofree char *seek = seconds_text(splice + 0.0005);
-        g_autofree char *length = seconds_text(end - splice);
+        g_autofree char *drop = j->end_splice_ms >= 0
+            ? g_strdup_printf("noise=drop=lt(pts\\,startpts)+gte(n\\,%" G_GINT64_FORMAT ")", j->tail_packets)
+            : g_strdup("noise=drop=lt(pts\\,startpts)");
         add_args(args, j->ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
-                 "-ss", seek, "-i", j->source, "-t", length, "-map", video, "-c", "copy",
-                 "-bsf:v", "noise=drop=lt(pts\\,startpts)", "-f", "mpegts", j->tail, NULL);
+                 "-ss", seek, "-i", j->source, NULL);
+        if (j->end_splice_ms >= 0) {
+            g_autofree char *length = seconds_text(end_splice - splice + 2.0);
+            add_args(args, "-t", length, NULL);
+        }
+        add_args(args, "-map", video, "-c", "copy", "-bsf:v", drop, "-f", "mpegts", j->tail, NULL);
+    } else if (stage == PROCESS_ENDING) {
+        publish(e, "encoding");
+        if (!add_encode(j, args, j->ending_start, end - j->ending_start - 0.0005, j->ending)) {
+            try_next_encoder(e);
+            return;
+        }
     } else if (stage == PROCESS_EXPORT) {
         publish(e, "exporting");
         g_autofree char *seek = seconds_text(start);
@@ -1019,6 +1109,11 @@ static void begin_smart_stage(TrimExport *e, ProcessStage stage)
         g_autofree char *length = seconds_text(splice - start + 1.0);
         add_args(args, j->ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin", "-xerror",
                  "-i", j->temp, "-map", "0:v:0", "-t", length, "-f", "null", "-", NULL);
+    } else if (stage == PROCESS_SPLICE_END) {
+        publish(e, "verifying");
+        g_autofree char *seek = seconds_text(j->ending_start - start - 1.0);
+        add_args(args, j->ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin", "-xerror",
+                 "-ss", seek, "-i", j->temp, "-map", "0:v:0", "-f", "null", "-", NULL);
     }
     g_ptr_array_add(args, NULL);
     run_process(e, (const char *const *)args->pdata);
@@ -1120,6 +1215,12 @@ static void analyze_source(ExportJob *j, const char *text)
     g_auto(GStrv) lines = g_strsplit(text ? text : "", "\n", -1);
     for (guint i = 0; lines[i]; ++i) {
         char *equals = strchr(lines[i], '=');
+        if (equals && g_str_has_prefix(lines[i], "format.start_time=")) {
+            const char *value = equals + 1 + (equals[1] == '"');
+            double time = g_ascii_strtod(value, NULL);
+            j->start_time = isfinite(time) ? time : 0;
+            continue;
+        }
         if (!equals || !g_str_has_prefix(lines[i], "streams.stream.0.")) continue;
         *equals = '\0';
         const char *key = lines[i] + strlen("streams.stream.0.");
@@ -1139,32 +1240,69 @@ static void analyze_source(ExportJob *j, const char *text)
     if (j->rotation && g_ascii_strtod(j->rotation, NULL) == 0) g_clear_pointer(&j->rotation, g_free);
 }
 
+/* From ffprobe's "pts,flags" packet list in decode order: the packets from
+ * the first keyframe up to the last one, and the last frame they show. */
+static gboolean measure_middle(ExportJob *j, const char *text)
+{
+    g_auto(GStrv) lines = g_strsplit(text ? text : "", "\n", -1);
+    double first = j->splice_ms / 1000.0, last = j->end_splice_ms / 1000.0, shown = -1;
+    gint64 index = -1, count = 0;
+    for (guint i = 0; lines[i]; ++i) {
+        g_strstrip(lines[i]);
+        char *comma = strchr(lines[i], ',');
+        if (!comma) continue;
+        *comma = '\0';
+        char *end = NULL;
+        double pts = g_ascii_strtod(lines[i], &end);
+        gboolean known = end && end != lines[i] && isfinite(pts);
+        gboolean key = strchr(comma + 1, 'K') != NULL;
+        if (known) pts -= j->start_time;
+        if (index < 0) {
+            if (key && known && fabs(pts - first) < 0.001) { index = 0; count = 0; }
+            else continue;
+        } else if (key && known && fabs(pts - last) < 0.001) {
+            j->tail_packets = count;
+            j->ending_start = shown + 0.0005;
+            return shown >= first;
+        }
+        ++count;
+        if (known && pts >= first - 0.0001) shown = MAX(shown, pts);
+    }
+    return FALSE;
+}
+
 static void smart_stage_finished(TrimExport *e, gboolean failed, const char *output)
 {
     ExportJob *j = e->job;
     ProcessStage stage = j->process_stage;
     if (failed) {
-        if (stage == PROCESS_HEAD) try_next_encoder(e);
+        if (stage == PROCESS_HEAD || stage == PROCESS_ENDING) try_next_encoder(e);
         else fall_back_to_keyframe(e);
         return;
     }
-    if (stage == PROCESS_ANALYZE) {
+    if (stage == PROCESS_HEAD || stage == PROCESS_ENDING) {
+        const char *encoder = j->encoders[j->encoder_index];
+        j->precise_result = g_str_has_prefix(encoder, "lib") ? "cpu" : "gpu";
+    }
+    switch (stage) {
+    case PROCESS_ANALYZE:
         analyze_source(j, output);
         choose_encoders(j);
-        if (j->encoder_count) begin_process(e, PROCESS_HEAD);
+        if (j->encoder_count) continue_smart(e, parts_order, G_N_ELEMENTS(parts_order), PROCESS_PACKETS);
         else fall_back_to_keyframe(e);
-    } else if (stage == PROCESS_HEAD || stage == PROCESS_TAIL) {
-        if (stage == PROCESS_HEAD) {
-            const char *encoder = j->encoders[j->encoder_index];
-            j->precise_result = g_str_has_prefix(encoder, "lib") ? "cpu" : "gpu";
-            if (j->splice_ms < j->end_ms) { begin_process(e, PROCESS_TAIL); return; }
-        }
-        g_autofree char *list = g_strdup_printf("ffconcat version 1.0\nfile 'head.ts'\n%s",
-            j->splice_ms < j->end_ms ? "file 'tail.ts'\n" : "");
-        if (!g_file_set_contents(j->list, list, -1, NULL)) fall_back_to_keyframe(e);
-        else begin_process(e, PROCESS_EXPORT);
-    } else if (stage == PROCESS_SPLICE) {
-        validated(e);
+        break;
+    case PROCESS_PACKETS:
+        if (measure_middle(j, output))
+            continue_smart(e, parts_order, G_N_ELEMENTS(parts_order), PROCESS_HEAD);
+        else
+            fall_back_to_keyframe(e);
+        break;
+    case PROCESS_HEAD: continue_smart(e, parts_order, G_N_ELEMENTS(parts_order), PROCESS_TAIL); break;
+    case PROCESS_TAIL: continue_smart(e, parts_order, G_N_ELEMENTS(parts_order), PROCESS_ENDING); break;
+    case PROCESS_ENDING: continue_smart(e, parts_order, G_N_ELEMENTS(parts_order), PROCESS_EXPORT); break;
+    case PROCESS_SPLICE: continue_smart(e, checks_order, G_N_ELEMENTS(checks_order), PROCESS_SPLICE_END); break;
+    case PROCESS_SPLICE_END: validated(e); break;
+    default: break;
     }
 }
 
@@ -1271,10 +1409,14 @@ gboolean trim_export_start(TrimExport *e, const TrimExportRequest *request, GErr
     j->start_ms = request->start_ms; j->end_ms = request->end_ms;
     j->precise = request->precise;
     j->splice_ms = request->splice_ms;
+    j->end_splice_ms = request->end_splice_ms;
     j->video_index = request->video_index;
     j->precise_result = "";
     if (j->precise != TRIM_PRECISE_OFF && !j->exclude_video) {
-        if (j->splice_ms > j->start_ms && j->splice_ms <= j->end_ms) j->smart = TRUE;
+        if (j->splice_ms >= j->start_ms && j->splice_ms <= j->end_ms &&
+            (j->splice_ms > j->start_ms || j->end_splice_ms >= 0) &&
+            (j->end_splice_ms < 0 || (j->end_splice_ms > j->splice_ms && j->end_splice_ms <= j->end_ms)))
+            j->smart = TRUE;
         else if (j->splice_ms < 0) j->precise_result = "fallback";
     }
     j->excluded_audio = g_array_sized_new(FALSE, FALSE, sizeof(gint64), (guint)request->excluded_audio_count);
@@ -1303,9 +1445,9 @@ gboolean trim_export_handle_event(TrimExport *e, const mpv_event *event)
         g_autofree char *stdout_text = captured_text(result, "stdout");
         g_autofree char *process_error = captured_text(result, "error_string");
         gboolean failed = event->error < 0 || map_integer(result, "status", -1) != 0;
-        if (j->smart && (failed || j->process_stage == PROCESS_ANALYZE ||
-                         j->process_stage == PROCESS_HEAD || j->process_stage == PROCESS_TAIL ||
-                         j->process_stage == PROCESS_SPLICE)) {
+        if (j->smart && (failed || (j->process_stage != PROCESS_EXPORT &&
+                                    j->process_stage != PROCESS_PROBE &&
+                                    j->process_stage != PROCESS_FRAME))) {
             smart_stage_finished(e, failed, stdout_text);
             return TRUE;
         }
@@ -1326,7 +1468,7 @@ gboolean trim_export_handle_event(TrimExport *e, const mpv_event *event)
             else if (!g_regex_match_simple("(?m)^\\d+,\\s*-?\\d+,", stdout_text, 0, 0))
                 fail_job(e, j->exclude_video ? "The selected interval has no decodable audio frame."
                     : "The selected interval has no decodable video frame.");
-            else if (j->smart) begin_process(e, PROCESS_SPLICE);
+            else if (j->smart) continue_smart(e, checks_order, G_N_ELEMENTS(checks_order), PROCESS_SPLICE);
             else validated(e);
         }
         return TRUE;

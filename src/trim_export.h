@@ -21,12 +21,16 @@ typedef struct {
      * extension saves beside the original, then removes the original. */
     gboolean exclude_video;
     const char *audio_extension;
-    /* Frame-accurate start: re-encode from start_ms to the next keyframe at
-     * splice_ms (end_ms when none follows) and stream-copy the rest. 0 means
-     * the start already is a keyframe; -1 that keyframes are unknown, which
-     * exports from the keyframe and reports a fallback. */
+    /* Frame-accurate cuts: re-encode from start_ms to the first keyframe at
+     * splice_ms (equal to start_ms when the start is a keyframe, end_ms when
+     * no copyable middle remains) and stream-copy from there. -1 means that
+     * keyframes are unknown, which exports from the keyframe and reports a
+     * fallback. */
     TrimPreciseMode precise;
     gint64 splice_ms;
+    /* Last keyframe before end_ms that ends the copied middle; the frames
+     * after it are re-encoded. -1 copies to the end of the file. */
+    gint64 end_splice_ms;
     gint64 video_index; /* Source-wide index of the video stream, or -1. */
 } TrimExportRequest;
 

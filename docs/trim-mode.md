@@ -90,14 +90,18 @@ rollback restores the original if reopening fails.
 
 ### Precise start
 
-FFmpeg stream copy can only start at a keyframe. With precise trimming, the
-export instead starts exactly at the selected frame: the part from the start
-to the next keyframe is re-encoded, and everything from that keyframe onward
-is copied losslessly, so only a fraction of a second up to one keyframe
-interval is re-encoded. Copied frames stay bit-exact; re-encoded frames use
+FFmpeg stream copy can only cut at keyframes. With precise trimming, the
+export instead starts and ends exactly at the selected frames: the part from
+the start to the next keyframe and the part from the last keyframe before the
+end are re-encoded, and everything between is copied losslessly, so at most
+one keyframe interval at each edge is re-encoded. A selection that runs to
+the end of the file copies to the end; one without a keyframe inside is
+re-encoded entirely. Copied frames stay bit-exact; re-encoded frames use
 the source codec, bit depth and chroma layout at visually lossless quality.
-Leading frames of open-GOP sources, which would reference the replaced
-frames, come from the re-encoded part instead. Audio and subtitles start at
+Leading frames of open-GOP sources, which would reference replaced frames,
+come from the re-encoded parts instead; the copied middle stops right before
+the last keyframe in decode order, and the ending resumes after the last
+frame it shows. Audio and subtitles start at
 the exact cut, and the display rotation is preserved.
 
 Choose the mode under **Settings → Playback → Precise trimming**
@@ -105,12 +109,13 @@ Choose the mode under **Settings → Playback → Precise trimming**
 
 - **CPU** (default): x264 for H.264, x265 for HEVC.
 - **GPU**: NVENC, then VA-API; if neither works, the CPU encoder is used.
-- **Off**: the export starts at the keyframe before the selection.
+- **Off**: the export starts at the keyframe before the selection and ends
+  by stream copy.
 
 Precise trimming supports H.264 and HEVC video. Other codecs, external video
 tracks, or a failed re-encode or splice check fall back to a keyframe export,
-and the completion message says so. The end of the selection keeps the
-stream-copy behavior. A start that already is a keyframe needs no re-encoding.
+and the completion message says so. Edges that already are keyframes need no
+re-encoding.
 
 Copy export saves beside the source with the selected times in its name;
 existing files are never overwritten. Replacement export writes and checks a

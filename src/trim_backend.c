@@ -322,12 +322,15 @@ static const char *audio_extension(const char *codec)
     return ".mka";
 }
 
-/* The keyframe that ends the re-encoded head: 0 when the start already is
- * one, end_ms when none follows before the end, -1 when keyframes are not
- * known for the exported source. */
-static gint64 splice_point(TrimBackend *b, gint64 *video_index)
+/* Splice points for a frame-accurate export. Returns the first keyframe at
+ * or after the start (start_ms when the start is one, end_ms when nothing
+ * between can be copied) and sets *end_splice to the last keyframe before
+ * the end, or -1 when the copy may run to the end of the file. Returns -1
+ * when keyframes are not known for the exported source. */
+static gint64 splice_points(TrimBackend *b, gint64 *video_index, gint64 *end_splice)
 {
     *video_index = -1;
+    *end_splice = -1;
     mpv_node track = {0};
     gboolean usable = mpv_get_property(b->mpv, "current-tracks/video", MPV_FORMAT_NODE, &track) >= 0 &&
         track.format == MPV_FORMAT_NODE_MAP && !map_flag(&track, "external") &&
@@ -335,17 +338,27 @@ static gint64 splice_point(TrimBackend *b, gint64 *video_index)
     if (usable) *video_index = map_integer(&track, "ff-index");
     mpv_free_node_contents(&track);
     if (!usable || !b->keyframes->len) return -1;
-    if (b->start_ms <= 0) return 0;
-    double start = b->start_ms / 1000.0;
+    const double tolerance = 0.0005;
+    double start = b->start_ms / 1000.0, end = b->end_ms / 1000.0;
+    gint64 first = b->end_ms;
     for (guint i = 0; i < b->keyframes->len; ++i) {
         double time = g_array_index(b->keyframes, double, i);
-        if (fabs(time - start) < 0.0005) return 0;
-        if (time > start) {
-            gint64 splice = (gint64)floor(time * 1000 + 0.5);
-            return splice > b->start_ms ? MIN(splice, b->end_ms) : 0;
-        }
+        if (time < start - tolerance) continue;
+        first = fabs(time - start) < tolerance ? b->start_ms : (gint64)floor(time * 1000 + 0.5);
+        break;
     }
-    return b->end_ms;
+    if (first >= b->end_ms || b->end_ms >= b->duration_ms) return MIN(first, b->end_ms);
+    gint64 last = -1;
+    for (guint i = b->keyframes->len; i-- > 0;) {
+        double time = g_array_index(b->keyframes, double, i);
+        if (time > end + tolerance) continue;
+        gint64 milliseconds = MIN((gint64)floor(time * 1000 + 0.5), b->end_ms);
+        if (milliseconds > first) last = milliseconds;
+        break;
+    }
+    if (last < 0) return b->end_ms; /* One GOP spans the end: re-encode it all. */
+    *end_splice = last;
+    return first;
 }
 
 static void select_video(TrimBackend *b, int argc, const char *const *argv)
@@ -1223,8 +1236,9 @@ void trim_backend_action(TrimBackend *b, const char *action, int argc, const cha
             }
             extension = b->audio_tracks->len - excluded->len == 1 ? audio_extension(first->codec) : ".mka";
         }
-        gint64 video_index = -1;
-        gint64 splice = b->include_video && b->precise != TRIM_PRECISE_OFF ? splice_point(b, &video_index) : 0;
+        gint64 video_index = -1, end_splice = -1;
+        gint64 splice = b->include_video && b->precise != TRIM_PRECISE_OFF
+            ? splice_points(b, &video_index, &end_splice) : b->start_ms;
         gboolean replace = g_str_equal(argument, "replace");
         TrimExportRequest request = {.ffmpeg_path = b->ffmpeg_path, .ffprobe_path = b->ffprobe_path,
             .expected_input = b->audio_source,
@@ -1232,7 +1246,8 @@ void trim_backend_action(TrimBackend *b, const char *action, int argc, const cha
             .start_ms = b->start_ms, .end_ms = b->end_ms,
             .excluded_audio = (const gint64 *)excluded->data, .excluded_audio_count = excluded->len,
             .exclude_video = !b->include_video, .audio_extension = extension,
-            .precise = b->precise, .splice_ms = splice, .video_index = video_index};
+            .precise = b->precise, .splice_ms = splice, .end_splice_ms = end_splice,
+            .video_index = video_index};
         g_autoptr(GError) error = NULL;
         if (!trim_export_start(b->exporter, &request, &error))
             publish_failure(b, error ? error->message : "Could not start the export.");

@@ -321,7 +321,7 @@ try:
             '-frames:v',str(frames),'-f','null','-'],capture_output=True,text=True,check=True).stdout
         return [float('inf') if 'inf' in x.split('psnr_avg:')[1].split()[0] else float(x.split('psnr_avg:')[1].split()[0])
             for x in text.splitlines() if 'psnr_avg:' in x]
-    def precise_export(path,mode,start):
+    def precise_export(path,mode,start,end=None):
         previous=audio_state()['file_serial']
         call('loadfile',str(path))
         wait(lambda:prop('user-data/trim-audio'),lambda x:x and x['file_serial']!=previous)
@@ -331,6 +331,10 @@ try:
         serial=str(time.monotonic_ns())
         action('set-time','start',start,serial)
         result=wait(lambda:prop('user-data/trim-field-result'),lambda x:x and x.get('serial')==serial);assert result['valid'],result
+        if end:
+            serial=str(time.monotonic_ns())
+            action('set-time','end',end,serial)
+            result=wait(lambda:prop('user-data/trim-field-result'),lambda x:x and x.get('serial')==serial);assert result['valid'],result
         action('export','keep')
         wait(lambda:prop('user-data/trim-export'),lambda x:x and x.get('busy'))
         result=wait(lambda:prop('user-data/trim-export'),lambda x:x and not x.get('busy') and 'success' in x,seconds=60)
@@ -354,6 +358,21 @@ try:
     psnr=frame_psnr(output,precise_hevc,0.52,80)
     assert len(psnr)>=80 and min(psnr[:37])>35 and all(x==float('inf') for x in psnr[37:80]),psnr
     print('PASS precise '+result['precise'].upper()+' cut of open-GOP 10-bit HEVC: leading frames replaced, no broken references',flush=True)
+    def frame_count(path):
+        return int(subprocess.check_output(['ffprobe','-v','error','-count_frames','-select_streams','v:0',
+            '-show_entries','stream=nb_read_frames','-of','csv=p=0',str(path)],text=True).strip())
+    # 0.52-4.70 s at 25 fps holds frames 13..117. Keyframes at 2 s and 4 s:
+    # re-encoded head, copied middle, re-encoded ending.
+    for path,mode in ((precise_h264,'cpu'),(precise_hevc,'gpu')):
+        result,output,streams=precise_export(path,mode,'00:00:00.520','00:00:04.700')
+        assert result['precise'] in ((mode,) if mode=='cpu' else ('gpu','cpu')),result
+        assert frame_count(output)==105,(result,frame_count(output))
+        psnr=frame_psnr(output,path,0.52,105)[:105]
+        copied=[i for i,x in enumerate(psnr) if x==float('inf')]
+        assert copied and copied==list(range(37,copied[-1]+1)) and len(copied)>=45,psnr
+        assert min(x for x in psnr if x!=float('inf'))>35,psnr
+        assert psnr[-1]>35,psnr
+        print(f'PASS precise {result["precise"].upper()} start and end: {len(copied)} copied frames between re-encoded head and ending, exact frame count',flush=True)
     result,output,streams=precise_export(precise_h264,'off','00:00:00.520')
     assert result['precise']=='',result
     assert frame_psnr(output,precise_h264,0,1)==[float('inf')],result
