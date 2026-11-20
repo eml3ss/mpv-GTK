@@ -3014,6 +3014,16 @@ static void preference_changed(const char *name, mpv_format format, const void *
         if (p->preferences) preferences_window_update(p->preferences, &p->preference_values);
         return;
     }
+    if (g_str_equal(name, "ui-trim-precise-cut")) {
+        if (format != MPV_FORMAT_INT64 || !value) return;
+        g_autoptr(GError) error = NULL;
+        if (!i18n_save_trim_precise_cut((int)*(const int64_t *)value, &error) && error)
+            show_error(p, error->message);
+        p->preference_values.trim_precise_cut = i18n_trim_precise_cut();
+        trim_mode_set_precise_cut(p->trim, p->preference_values.trim_precise_cut);
+        if (p->preferences) preferences_window_update(p->preferences, &p->preference_values);
+        return;
+    }
     if (g_str_equal(name, "ui-queue-sort")) {
         if (format != MPV_FORMAT_INT64 || !value) return;
         int64_t mode = *(const int64_t *)value;
@@ -4818,6 +4828,7 @@ static void activate(GtkApplication *application, gpointer data)
         .previews = p->seek_preview
     };
     p->trim = trim_mode_new(&trim_host);
+    trim_mode_set_precise_cut(p->trim, p->preference_values.trim_precise_cut);
     gtk_box_append(GTK_BOX(transport), trim_mode_button(p->trim));
     GtkWidget *info = icon_button("dialog-information-symbolic",
         "Информация · I\nЛКМ — на видео, ПКМ — отдельное окно", "app.info");
@@ -5049,6 +5060,7 @@ int main(int argc, char **argv)
     p.preference_values.add_to_queue = i18n_add_to_queue();
     p.preference_values.timeline_previews = i18n_timeline_previews();
     p.preference_values.queue_sort = i18n_queue_sort();
+    p.preference_values.trim_precise_cut = i18n_trim_precise_cut();
     p.initial_queue_sort = p.preference_values.queue_sort;
     p.initial_queue_sort_pending = p.initial_queue_sort >= 0;
     /* GTK must not change the numeric locale while early demuxing runs on

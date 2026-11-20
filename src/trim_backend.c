@@ -52,6 +52,7 @@ struct TrimBackend {
     gboolean stopped, enabled, ever_enabled, loaded, video_available;
     gboolean gtk_editing, shortcuts_active, follows_duration;
     gboolean remember, open_copy, open_replace, include_video;
+    TrimPreciseMode precise;
     char *ffmpeg_path, *ffprobe_path, *state_path, *audio_source;
     gint64 start_ms, end_ms, duration_ms, file_serial;
     GArray *keyframes;
@@ -319,6 +320,32 @@ static const char *audio_extension(const char *codec)
     for (gsize i = 0; codec && i < G_N_ELEMENTS(formats); ++i)
         if (g_str_equal(codec, formats[i].codec)) return formats[i].extension;
     return ".mka";
+}
+
+/* The keyframe that ends the re-encoded head: 0 when the start already is
+ * one, end_ms when none follows before the end, -1 when keyframes are not
+ * known for the exported source. */
+static gint64 splice_point(TrimBackend *b, gint64 *video_index)
+{
+    *video_index = -1;
+    mpv_node track = {0};
+    gboolean usable = mpv_get_property(b->mpv, "current-tracks/video", MPV_FORMAT_NODE, &track) >= 0 &&
+        track.format == MPV_FORMAT_NODE_MAP && !map_flag(&track, "external") &&
+        !*map_text(&track, "external-filename");
+    if (usable) *video_index = map_integer(&track, "ff-index");
+    mpv_free_node_contents(&track);
+    if (!usable || !b->keyframes->len) return -1;
+    if (b->start_ms <= 0) return 0;
+    double start = b->start_ms / 1000.0;
+    for (guint i = 0; i < b->keyframes->len; ++i) {
+        double time = g_array_index(b->keyframes, double, i);
+        if (fabs(time - start) < 0.0005) return 0;
+        if (time > start) {
+            gint64 splice = (gint64)floor(time * 1000 + 0.5);
+            return splice > b->start_ms ? MIN(splice, b->end_ms) : 0;
+        }
+    }
+    return b->end_ms;
 }
 
 static void select_video(TrimBackend *b, int argc, const char *const *argv)
@@ -1034,7 +1061,8 @@ static gboolean client_message(TrimBackend *b, const mpv_event_client_message *m
     if (g_str_equal(name, "toggle") || g_str_equal(name, "set-enabled") || g_str_equal(name, "set-time") ||
         g_str_equal(name, "gtk-focus") || g_str_equal(name, "set-boundary") ||
         g_str_equal(name, "keyframe") || g_str_equal(name, "export") || g_str_equal(name, "edit-blur") ||
-        g_str_equal(name, "set-audio") || g_str_equal(name, "audio-all") || g_str_equal(name, "set-video")) {
+        g_str_equal(name, "set-audio") || g_str_equal(name, "audio-all") || g_str_equal(name, "set-video") ||
+        g_str_equal(name, "set-precise-cut")) {
         trim_backend_action(b, name, message->num_args - 1, (const char *const *)(message->args + 1));
         return TRUE;
     }
@@ -1107,6 +1135,7 @@ TrimBackend *trim_backend_new_with_runtime(mpv_handle *mpv, const char *config_p
     b->wake_fd = -1;
     b->follows_duration = TRUE;
     b->include_video = TRUE;
+    b->precise = TRIM_PRECISE_CPU;
     b->keyframe_target = -1;
     b->playback_speed = 1; b->playback_fps = 25;
     b->keyframes = g_array_new(FALSE, FALSE, sizeof(double));
@@ -1163,6 +1192,11 @@ void trim_backend_action(TrimBackend *b, const char *action, int argc, const cha
     else if (g_str_equal(action, "set-audio")) select_audio(b, FALSE, argc, argv);
     else if (g_str_equal(action, "audio-all")) select_audio(b, TRUE, argc, argv);
     else if (g_str_equal(action, "set-video")) select_video(b, argc, argv);
+    else if (g_str_equal(action, "set-precise-cut")) {
+        if (g_str_equal(argument, "off")) b->precise = TRIM_PRECISE_OFF;
+        else if (g_str_equal(argument, "cpu")) b->precise = TRIM_PRECISE_CPU;
+        else if (g_str_equal(argument, "gpu")) b->precise = TRIM_PRECISE_GPU;
+    }
     else if (g_str_equal(action, "export")) {
         if (!b->enabled || !available(b) || (!g_str_equal(argument, "keep") && !g_str_equal(argument, "replace")) ||
             trim_export_busy(b->exporter)) return;
@@ -1189,13 +1223,16 @@ void trim_backend_action(TrimBackend *b, const char *action, int argc, const cha
             }
             extension = b->audio_tracks->len - excluded->len == 1 ? audio_extension(first->codec) : ".mka";
         }
+        gint64 video_index = -1;
+        gint64 splice = b->include_video && b->precise != TRIM_PRECISE_OFF ? splice_point(b, &video_index) : 0;
         gboolean replace = g_str_equal(argument, "replace");
         TrimExportRequest request = {.ffmpeg_path = b->ffmpeg_path, .ffprobe_path = b->ffprobe_path,
             .expected_input = b->audio_source,
             .replace = replace, .open_result = replace ? b->open_replace : b->open_copy,
             .start_ms = b->start_ms, .end_ms = b->end_ms,
             .excluded_audio = (const gint64 *)excluded->data, .excluded_audio_count = excluded->len,
-            .exclude_video = !b->include_video, .audio_extension = extension};
+            .exclude_video = !b->include_video, .audio_extension = extension,
+            .precise = b->precise, .splice_ms = splice, .video_index = video_index};
         g_autoptr(GError) error = NULL;
         if (!trim_export_start(b->exporter, &request, &error))
             publish_failure(b, error ? error->message : "Could not start the export.");

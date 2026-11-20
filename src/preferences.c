@@ -21,7 +21,7 @@ typedef struct {
     PreferenceValues values;
     GtkSwitch *keepaspect, *deinterlace, *deband, *loop;
     GtkSwitch *allow_replace, *add_to_queue, *timeline_previews;
-    GtkDropDown *autocreate_playlist, *directory_mode, *queue_sort, *hr_seek;
+    GtkDropDown *autocreate_playlist, *directory_mode, *queue_sort, *hr_seek, *trim_precise;
     GtkLabel *hr_seek_description;
     GPtrArray *autocreate_values, *directory_values;
     GtkLabel *autocreate_description, *directory_description;
@@ -953,6 +953,17 @@ static void changed_queue_sort(GObject *object, GParamSpec *property, gpointer d
     p->on_change("ui-queue-sort", MPV_FORMAT_INT64, &mode, p->user_data);
 }
 
+static void changed_trim_precise(GObject *object, GParamSpec *property, gpointer data)
+{
+    (void)property;
+    Preferences *p = data;
+    guint selected = gtk_drop_down_get_selected(GTK_DROP_DOWN(object));
+    if (p->updating || !p->on_change || selected > 2)
+        return;
+    int64_t mode = selected;
+    p->on_change("ui-trim-precise-cut", MPV_FORMAT_INT64, &mode, p->user_data);
+}
+
 static const char *hr_seek_hint(const char *value)
 {
     if (!value)
@@ -1219,6 +1230,9 @@ static void refresh_controls(Preferences *p, const char *section)
                 mode != GTK_INVALID_LIST_POSITION && p->on_change);
             gtk_label_set_text(p->hr_seek_description, hr_seek_hint(values->hr_seek));
         }
+        if (p->trim_precise)
+            gtk_drop_down_set_selected(p->trim_precise,
+                values->trim_precise_cut >= 0 && values->trim_precise_cut <= 2 ? (guint)values->trim_precise_cut : 1);
         if (p->queue_sort) {
             int mode = values->queue_sort >= -1 && values->queue_sort <= 7
                      ? values->queue_sort : -1;
@@ -1557,6 +1571,14 @@ static void build_playback(Preferences *p)
         tr("Применяется при следующем запуске плеера. Текущая очередь не меняется."),
         GTK_WIDGET(p->queue_sort));
     g_signal_connect(p->queue_sort, "notify::selected", G_CALLBACK(changed_queue_sort), p);
+    const char *precise_labels[] = {
+        tr("Выключена: по ключевым кадрам"), tr("Процессор"), tr("Видеокарта"), NULL
+    };
+    p->trim_precise = GTK_DROP_DOWN(gtk_drop_down_new_from_strings(precise_labels));
+    row(playback, tr("Точная обрезка"),
+        tr("Режим обрезки начинает экспорт точно с выбранного кадра: участок до ближайшего ключевого кадра перекодируется, остальное копируется без потерь. Видеокарта при недоступности заменяется процессором."),
+        GTK_WIDGET(p->trim_precise));
+    g_signal_connect(p->trim_precise, "notify::selected", G_CALLBACK(changed_trim_precise), p);
     GtkWidget *content = gtk_widget_get_parent(playback);
     GtkWidget *title = gtk_label_new(tr("Автосоздание плейлиста"));
     gtk_label_set_xalign(GTK_LABEL(title), 0);

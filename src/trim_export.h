@@ -5,6 +5,7 @@
 #include <mpv/client.h>
 
 typedef struct TrimExport TrimExport;
+typedef enum { TRIM_PRECISE_OFF, TRIM_PRECISE_CPU, TRIM_PRECISE_GPU } TrimPreciseMode;
 typedef struct {
     const char *ffmpeg_path, *ffprobe_path;
     const char *expected_input; /* Optional mpv path guard for the selection's source. */
@@ -20,6 +21,13 @@ typedef struct {
      * extension saves beside the original, then removes the original. */
     gboolean exclude_video;
     const char *audio_extension;
+    /* Frame-accurate start: re-encode from start_ms to the next keyframe at
+     * splice_ms (end_ms when none follows) and stream-copy the rest. 0 means
+     * the start already is a keyframe; -1 that keyframes are unknown, which
+     * exports from the keyframe and reports a fallback. */
+    TrimPreciseMode precise;
+    gint64 splice_ms;
+    gint64 video_index; /* Source-wide index of the video stream, or -1. */
 } TrimExportRequest;
 
 TrimExport *trim_export_new(mpv_handle *mpv);

@@ -88,6 +88,30 @@ Such exports are verified by decoding an audio frame. A replacement saves
 removes the original video and points its queue entry at the new file;
 rollback restores the original if reopening fails.
 
+### Precise start
+
+FFmpeg stream copy can only start at a keyframe. With precise trimming, the
+export instead starts exactly at the selected frame: the part from the start
+to the next keyframe is re-encoded, and everything from that keyframe onward
+is copied losslessly, so only a fraction of a second up to one keyframe
+interval is re-encoded. Copied frames stay bit-exact; re-encoded frames use
+the source codec, bit depth and chroma layout at visually lossless quality.
+Leading frames of open-GOP sources, which would reference the replaced
+frames, come from the re-encoded part instead. Audio and subtitles start at
+the exact cut, and the display rotation is preserved.
+
+Choose the mode under **Settings → Playback → Precise trimming**
+(`trim-precise-cut` in `interface.conf`):
+
+- **CPU** (default): x264 for H.264, x265 for HEVC.
+- **GPU**: NVENC, then VA-API; if neither works, the CPU encoder is used.
+- **Off**: the export starts at the keyframe before the selection.
+
+Precise trimming supports H.264 and HEVC video. Other codecs, external video
+tracks, or a failed re-encode or splice check fall back to a keyframe export,
+and the completion message says so. The end of the selection keeps the
+stream-copy behavior. A start that already is a keyframe needs no re-encoding.
+
 Copy export saves beside the source with the selected times in its name;
 existing files are never overwritten. Replacement export writes and checks a
 temporary result before replacing the source, with original-file identity

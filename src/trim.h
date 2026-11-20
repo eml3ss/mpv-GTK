@@ -33,6 +33,8 @@ gboolean trim_mode_audio_menu_open(const TrimMode *trim);
 gboolean trim_mode_holding(const TrimMode *trim);
 void trim_mode_position(TrimMode *trim, double seconds, gboolean paused);
 void trim_mode_translate(TrimMode *trim);
+/* 0 cuts the start at keyframes, 1 re-encodes it on the CPU, 2 on the GPU. */
+void trim_mode_set_precise_cut(TrimMode *trim, int mode);
 void trim_mode_shutdown(TrimMode *trim);
 void trim_mode_free(TrimMode *trim);
 

@@ -118,3 +118,4 @@ implementation task. Queue restoration remains a separate task under item 2.
 - [x] Preserve export verification, backup/rollback, result opening, and playback state.
 - [x] Show native GTK export progress; initialize the backend and trim controls on demand.
 - [x] Implement all Trim Mode logic in C, including keyframes, validation, export, and recovery.
+- [x] Start exports at the exact selected frame by re-encoding only up to the next keyframe, on the CPU or GPU, selectable in Playback settings.

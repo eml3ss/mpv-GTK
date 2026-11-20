@@ -38,6 +38,11 @@ gboolean i18n_save_timeline_previews(gboolean enabled, GError **error);
 /* Default queue order at startup: -1 keeps mpv's order, 0..7 are the queue
  * title/path/created/modified sorts in ascending/descending pairs. */
 int i18n_queue_sort(void);
+
+/* Trim Mode start precision: 0 cuts at keyframes, 1 re-encodes the start
+ * on the CPU (default), 2 on the GPU with CPU fallback. */
+int i18n_trim_precise_cut(void);
+gboolean i18n_save_trim_precise_cut(int mode, GError **error);
 gboolean i18n_save_queue_sort(int mode, GError **error);
 
 #endif

@@ -54,6 +54,7 @@ struct TrimMode {
     double selection_from[2], selection_to[2];
     double position, pending_seek;
     char *phase;
+    int precise_cut;
 };
 
 static void cancel_drag(TrimMode *t);
@@ -646,6 +647,7 @@ static void arrange(TrimMode *t)
 
 static const char *phase_label(const char *phase)
 {
+    if (g_strcmp0(phase, "encoding") == 0) return tr("Перекодирование начала до ключевого кадра…");
     if (g_strcmp0(phase, "verifying") == 0) return tr("Проверка результата…");
     if (g_strcmp0(phase, "preparing") == 0) return tr("Подготовка экспорта…");
     if (g_strcmp0(phase, "rollback") == 0 || g_strcmp0(phase, "restoring") == 0)
@@ -844,6 +846,8 @@ static void load_backend(TrimMode *t)
         mpv_observe_property(t->host.mpv, TRIM_OBSERVE_BASE + i, properties[i], MPV_FORMAT_NODE);
     t->backend = trim_backend_new_with_runtime(t->host.mpv, t->config_path, t->runtime_directory);
     t->ready = t->backend != NULL;
+    if (t->ready)
+        trim_mode_set_precise_cut(t, t->precise_cut);
     if (t->ready && t->requested >= 0)
         trim_backend_set_enabled(t->backend, t->requested != 0);
 }
@@ -868,6 +872,7 @@ TrimMode *trim_mode_new(const TrimHost *host)
     t->keyframes = g_array_new(FALSE, FALSE, sizeof(double));
     t->audio_choices = g_ptr_array_new_with_free_func(audio_choice_free);
     t->video_included = TRUE;
+    t->precise_cut = 1;
     t->audio_file_serial = -1;
     t->button = g_object_ref_sink(glyph_button(SCISSORS, "Режим обрезки · Ctrl+T"));
     gtk_widget_set_visible(t->button, FALSE);
@@ -947,6 +952,17 @@ void trim_mode_position(TrimMode *t, double seconds, gboolean paused)
     g_autofree char *label = t->frame >= 0 ? g_strdup_printf("%s (%" G_GINT64_FORMAT ")", time, t->frame) : g_strdup(time);
     if (g_strcmp0(label, gtk_label_get_text(t->host.time)) != 0) gtk_label_set_text(t->host.time, label);
     gtk_widget_queue_draw(t->canvas);
+}
+
+void trim_mode_set_precise_cut(TrimMode *t, int mode)
+{
+    static const char *const names[] = {"off", "cpu", "gpu"};
+    if (!t || mode < 0 || mode > 2) return;
+    t->precise_cut = mode;
+    if (t->backend && !t->stopped) {
+        const char *args[] = {names[mode]};
+        trim_backend_action(t->backend, "set-precise-cut", 1, args);
+    }
 }
 
 void trim_mode_translate(TrimMode *t)
@@ -1074,7 +1090,12 @@ gboolean trim_mode_handle_event(TrimMode *t, const mpv_event *event)
         if (!t->busy && field(node, "success")) {
             gboolean success = flag_field(node, "success");
             g_autofree char *name = g_path_get_basename(text_field(node, "path"));
-            g_autofree char *message = success ? g_strdup_printf(tr("Сохранено: %s"), name)
+            gboolean fallback = success && g_strcmp0(text_field(node, "precise"), "fallback") == 0;
+            g_autofree char *saved = g_strdup_printf(tr("Сохранено: %s"), name);
+            g_autofree char *message = fallback
+                ? g_strdup_printf("%s\n%s", saved,
+                                  tr("Точная обрезка недоступна для этого видео: начало сдвинуто к ключевому кадру."))
+                : success ? g_strdup(saved)
                 : g_strdup_printf("%s%s%s", text_field(node, "error"),
                     *text_field(node, "backup") ? "\n" : "", text_field(node, "backup"));
             t->host.message(message, !success, t->host.data);

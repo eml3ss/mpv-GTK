@@ -36,6 +36,8 @@ typedef struct {
     gboolean allow_replace;
     gboolean add_to_queue;
     gboolean timeline_previews;
+    /* Trim Mode start precision: 0 keyframe, 1 CPU, 2 GPU. */
+    int trim_precise_cut;
     /* Startup-only queue sorting, -1 unchanged or queue sort mode 0..7. */
     int queue_sort;
     double audio_delay;

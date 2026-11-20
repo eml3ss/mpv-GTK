@@ -33,6 +33,19 @@ subprocess.run(['ffmpeg','-nostdin','-v','error',
     '-f','lavfi','-i','sine=frequency=440:sample_rate=48000:duration=4',
     '-c:v','libx264','-preset','ultrafast','-g','25','-threads','1','-c:a','aac',
     '-timecode','01:00:00:00','-shortest',str(timecoded)],check=True)
+def clip(path,codec,extra):
+    subprocess.run(['ffmpeg','-nostdin','-v','error',
+        '-f','lavfi','-i','testsrc2=size=320x180:rate=25:duration=6',
+        '-f','lavfi','-i','sine=frequency=440:sample_rate=48000:duration=6',
+        '-c:v',codec,*extra,'-threads','1','-c:a','aac','-shortest',str(path)],check=True)
+# Keyframes every two seconds; x265 defaults to open GOPs with leading frames.
+precise_h264=tmp/'precise h264.mp4'
+clip(precise_h264,'libx264',['-preset','ultrafast','-g','50','-keyint_min','50','-sc_threshold','0','-bf','2'])
+precise_hevc=tmp/'precise hevc.mp4'
+clip(precise_hevc,'libx265',['-preset','ultrafast','-pix_fmt','yuv420p10le','-tag:v','hvc1',
+    '-x265-params','keyint=50:min-keyint=50:scenecut=0:log-level=error'])
+precise_mpeg4=tmp/'precise mpeg4.mkv'
+clip(precise_mpeg4,'mpeg4',['-g','50'])
 external=tmp/'external.flac'
 subprocess.run(['ffmpeg','-nostdin','-v','error','-f','lavfi','-i',
     'sine=frequency=220:sample_rate=48000:duration=4','-c:a','flac',str(external)],check=True)
@@ -301,6 +314,52 @@ try:
     assert [x['codec_type'] for x in streams if x['codec_type']!='data']==['video','audio'],streams
     assert streams[0].get('tags',{}).get('timecode')=='01:00:00:00',streams
     print('PASS MP4 timecode tracks are rebuilt instead of copied',flush=True)
+    def frame_psnr(output,source,start,frames):
+        # Per-frame PSNR of the export against the source from the exact start.
+        text=subprocess.run(['ffmpeg','-v','error','-i',str(output),'-ss',str(start),'-i',str(source),
+            '-lavfi','[0:v]setpts=PTS-STARTPTS,format=yuv420p[a];[1:v]setpts=PTS-STARTPTS,format=yuv420p[b];[a][b]psnr=stats_file=-',
+            '-frames:v',str(frames),'-f','null','-'],capture_output=True,text=True,check=True).stdout
+        return [float('inf') if 'inf' in x.split('psnr_avg:')[1].split()[0] else float(x.split('psnr_avg:')[1].split()[0])
+            for x in text.splitlines() if 'psnr_avg:' in x]
+    def precise_export(path,mode,start):
+        previous=audio_state()['file_serial']
+        call('loadfile',str(path))
+        wait(lambda:prop('user-data/trim-audio'),lambda x:x and x['file_serial']!=previous)
+        wait(lambda:prop('user-data/trim-mode'),lambda x:x and len(x.get('keyframes',[]))>=3)
+        wait(lambda:prop('user-data/trim-controls'),lambda x:x and x.get('available'))
+        action('set-precise-cut',mode)
+        serial=str(time.monotonic_ns())
+        action('set-time','start',start,serial)
+        result=wait(lambda:prop('user-data/trim-field-result'),lambda x:x and x.get('serial')==serial);assert result['valid'],result
+        action('export','keep')
+        wait(lambda:prop('user-data/trim-export'),lambda x:x and x.get('busy'))
+        result=wait(lambda:prop('user-data/trim-export'),lambda x:x and not x.get('busy') and 'success' in x,seconds=60)
+        assert result['success'],result
+        output=Path(result['path'])
+        assert not subprocess.run(['ffmpeg','-v','error','-xerror','-i',str(output),'-f','null','-'],
+            capture_output=True,text=True).stderr,output
+        streams=json.loads(subprocess.check_output(['ffprobe','-v','error','-show_streams',
+            '-of','json',str(output)],text=True))['streams']
+        return result,output,streams
+    # Start at frame 13, between the keyframes at 0 s and 2 s.
+    result,output,streams=precise_export(precise_h264,'cpu','00:00:00.520')
+    assert result['precise']=='cpu',result
+    psnr=frame_psnr(output,precise_h264,0.52,80)
+    assert len(psnr)>=80 and min(psnr[:37])>35 and all(x==float('inf') for x in psnr[37:80]),psnr
+    starts={x['codec_type']:float(x['start_time']) for x in streams}
+    assert abs(starts['video']-starts['audio'])<0.05,streams
+    print('PASS precise CPU cut: re-encoded head from the exact frame, bit-exact copied tail, synchronized audio',flush=True)
+    result,output,streams=precise_export(precise_hevc,'gpu','00:00:00.520')
+    assert result['precise'] in ('gpu','cpu'),result
+    psnr=frame_psnr(output,precise_hevc,0.52,80)
+    assert len(psnr)>=80 and min(psnr[:37])>35 and all(x==float('inf') for x in psnr[37:80]),psnr
+    print('PASS precise '+result['precise'].upper()+' cut of open-GOP 10-bit HEVC: leading frames replaced, no broken references',flush=True)
+    result,output,streams=precise_export(precise_h264,'off','00:00:00.520')
+    assert result['precise']=='',result
+    assert frame_psnr(output,precise_h264,0,1)==[float('inf')],result
+    result,output,streams=precise_export(precise_mpeg4,'cpu','00:00:00.520')
+    assert result['precise']=='fallback',result
+    print('PASS keyframe exports when precise cutting is off or the codec is unsupported',flush=True)
     previous=audio_state()['file_serial']
     call('loadfile',str(source))
     wait(lambda:prop('user-data/trim-audio'),lambda x:x and x['file_serial']!=previous and x.get('video_included'))

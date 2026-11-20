@@ -17,6 +17,8 @@ static gboolean allow_replace = TRUE;
 static gboolean add_to_queue;
 static gboolean timeline_previews = TRUE;
 static int queue_sort = -1;
+static int trim_precise_cut = 1;
+static const char *const trim_precise_names[] = {"off", "cpu", "gpu"};
 static const char *const queue_sort_names[] = {
     "none", "title-asc", "title-desc", "path-asc", "path-desc",
     "created-asc", "created-desc", "modified-asc", "modified-desc"
@@ -145,6 +147,7 @@ gboolean i18n_init(const char *mpv_config_path, GError **error)
     add_to_queue = FALSE;
     timeline_previews = TRUE;
     queue_sort = -1;
+    trim_precise_cut = 1;
     g_clear_pointer(&interface_path, g_free);
     if (!mpv_config_path || !*mpv_config_path) {
         g_set_error_literal(error, G_FILE_ERROR, G_FILE_ERROR_INVAL,
@@ -164,6 +167,10 @@ gboolean i18n_init(const char *mpv_config_path, GError **error)
     allow_replace = load_boolean(file, "allow-replace", TRUE);
     add_to_queue = load_boolean(file, "add-to-queue", FALSE);
     timeline_previews = load_boolean(file, "timeline-previews", TRUE);
+    g_autofree char *precise = g_key_file_get_string(file, "Interface", "trim-precise-cut", NULL);
+    for (guint i = 0; precise && i < G_N_ELEMENTS(trim_precise_names); ++i)
+        if (g_str_equal(precise, trim_precise_names[i]))
+            trim_precise_cut = (int)i;
     g_autofree char *sort = g_key_file_get_string(file, "Interface", "queue-sort", NULL);
     for (guint i = 0; sort && i < G_N_ELEMENTS(queue_sort_names); ++i) {
         if (g_str_equal(sort, queue_sort_names[i])) {
@@ -287,6 +294,24 @@ gboolean i18n_timeline_previews(void)
 gboolean i18n_save_timeline_previews(gboolean enabled, GError **error)
 {
     return save_boolean("timeline-previews", enabled, &timeline_previews, error);
+}
+
+int i18n_trim_precise_cut(void)
+{
+    return trim_precise_cut;
+}
+
+gboolean i18n_save_trim_precise_cut(int mode, GError **error)
+{
+    if (!interface_path || mode < 0 || mode > 2) {
+        g_set_error_literal(error, G_FILE_ERROR, G_FILE_ERROR_INVAL,
+                            "Initialize UI preferences and select a valid precise cut mode before saving");
+        return FALSE;
+    }
+    if (!save_value("trim-precise-cut", trim_precise_names[mode], error))
+        return FALSE;
+    trim_precise_cut = mode;
+    return TRUE;
 }
 
 int i18n_queue_sort(void)
