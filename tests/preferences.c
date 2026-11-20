@@ -493,6 +493,33 @@ int main(void)
     };
     for (unsigned i = 0; i < G_N_ELEMENTS(expected); ++i)
         g_assert_nonnull(strstr(saved, expected[i]));
+    /* The repeat setting saves both options; the repeat button and its key
+     * only change the running engine. */
+    int64_t repeat = 1;
+    preference_changed("ui-repeat", MPV_FORMAT_INT64, &repeat, &p);
+    g_autofree char *repeat_saved = NULL;
+    g_assert_true(g_file_get_contents(path, &repeat_saved, NULL, &error));
+    g_assert_nonnull(strstr(repeat_saved, "loop-file=no\n"));
+    g_assert_nonnull(strstr(repeat_saved, "loop-playlist=inf\n"));
+    g_assert_cmpint(p.preference_values.saved_repeat, ==, 1);
+    set_repeat_mode(&p, 2);
+    for (int i = 0; i < 200; ++i) {
+        char *loop = mpv_get_property_string(p.mpv, "loop-file");
+        gboolean done = loop && g_str_equal(loop, "inf");
+        mpv_free(loop);
+        if (done) break;
+        g_usleep(5000);
+    }
+    char *live = mpv_get_property_string(p.mpv, "loop-file");
+    g_assert_cmpstr(live, ==, "inf");
+    mpv_free(live);
+    g_autofree char *after_button = NULL;
+    g_assert_true(g_file_get_contents(path, &after_button, NULL, &error));
+    g_assert_cmpstr(after_button, ==, repeat_saved);
+    g_assert_cmpint(p.preference_values.saved_repeat, ==, 1);
+    repeat = 2;
+    preference_changed("ui-repeat", MPV_FORMAT_INT64, &repeat, &p);
+    g_assert_cmpint(p.preference_values.saved_repeat, ==, 2);
     /* A batch-save failure must roll back the displayed graphics API;
      * neither staging nor failure may change the current engine options. */
     const char invalid[] = "vo=libmpv\n\0preserve trailing bytes\n";

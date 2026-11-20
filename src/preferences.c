@@ -19,7 +19,8 @@ typedef struct {
     guint64 audio_catalog_generation, audio_model_generation;
     GtkLabel *hwdec_description, *hwdec_status;
     PreferenceValues values;
-    GtkSwitch *keepaspect, *deinterlace, *deband, *loop;
+    GtkSwitch *keepaspect, *deinterlace, *deband;
+    GtkDropDown *repeat;
     GtkSwitch *allow_replace, *add_to_queue, *timeline_previews;
     GtkDropDown *autocreate_playlist, *directory_mode, *queue_sort, *hr_seek, *trim_precise;
     GtkLabel *hr_seek_description;
@@ -547,12 +548,7 @@ static void changed_switch(GObject *object, GParamSpec *property, gpointer data)
         return;
     const char *name = g_object_get_data(object, "mpv-preference-name");
     int enabled = gtk_switch_get_active(GTK_SWITCH(object));
-    if (g_str_equal(name, "loop-file")) {
-        const char *value = enabled ? "inf" : "no";
-        p->on_change(name, MPV_FORMAT_STRING, &value, p->user_data);
-    } else {
-        p->on_change(name, MPV_FORMAT_FLAG, &enabled, p->user_data);
-    }
+    p->on_change(name, MPV_FORMAT_FLAG, &enabled, p->user_data);
 }
 
 static GtkSwitch *add_switch(Preferences *p, GtkWidget *card, const char *name,
@@ -953,6 +949,17 @@ static void changed_queue_sort(GObject *object, GParamSpec *property, gpointer d
     p->on_change("ui-queue-sort", MPV_FORMAT_INT64, &mode, p->user_data);
 }
 
+static void changed_repeat(GObject *object, GParamSpec *property, gpointer data)
+{
+    (void)property;
+    Preferences *p = data;
+    guint selected = gtk_drop_down_get_selected(GTK_DROP_DOWN(object));
+    if (p->updating || !p->on_change || selected > 2)
+        return;
+    int64_t mode = selected;
+    p->on_change("ui-repeat", MPV_FORMAT_INT64, &mode, p->user_data);
+}
+
 static void changed_trim_precise(GObject *object, GParamSpec *property, gpointer data)
 {
     (void)property;
@@ -1212,8 +1219,9 @@ static void refresh_controls(Preferences *p, const char *section)
         gtk_switch_set_active(p->deinterlace, values->deinterlace);
     if (p->deband && (!section || g_str_equal(section, "video")))
         gtk_switch_set_active(p->deband, values->deband);
-    if (p->loop && (!section || g_str_equal(section, "playback")))
-        gtk_switch_set_active(p->loop, values->loop);
+    if (p->repeat && (!section || g_str_equal(section, "playback")))
+        gtk_drop_down_set_selected(p->repeat,
+            values->saved_repeat >= 0 && values->saved_repeat <= 2 ? (guint)values->saved_repeat : 0);
     if (!section || g_str_equal(section, "playback")) {
         if (p->hr_seek) {
             const char *value = g_strcmp0(values->hr_seek, "always") == 0
@@ -1544,8 +1552,12 @@ static void extensions_changed(GObject *object, GParamSpec *property, gpointer d
 static void build_playback(Preferences *p)
 {
     GtkWidget *playback = page(p->sections[3], tr("Воспроизведение"));
-    p->loop = add_switch(p, playback, "loop-file", tr("Повторять текущий файл"),
-        tr("После окончания начинает текущий файл заново."));
+    const char *repeat_labels[] = {tr("Выключен"), tr("Плейлист"), tr("Файл"), NULL};
+    p->repeat = GTK_DROP_DOWN(gtk_drop_down_new_from_strings(repeat_labels));
+    row(playback, tr("Повтор"),
+        tr("Плейлист начинает очередь заново после последнего файла, файл — повторяет текущий. Сохраняется для следующих запусков; кнопка повтора и клавиша L меняют режим только до закрытия."),
+        GTK_WIDGET(p->repeat));
+    g_signal_connect(p->repeat, "notify::selected", G_CALLBACK(changed_repeat), p);
     const char *hr_seek_labels[] = {
         tr("По умолчанию"), tr("Отключено"), tr("Только абсолютная"), tr("Всегда"), NULL
     };

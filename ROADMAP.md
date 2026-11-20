@@ -13,7 +13,8 @@ from unfinished interface work. Item 16 is tentative.
 - [x] Add search, sorting, shuffle, and repeat controls for the whole queue.
 - [x] Sort local queue entries by creation and modification dates in either direction.
 - [x] Resize the queue panel, indicate its selected sorting mode, and choose startup sorting in Playback settings.
-- [x] Cycle no repeat, playlist repeat, and file repeat from a button in the playback controls.
+- [x] Cycle no repeat, playlist repeat, and file repeat from a button in the playback controls or with the L key, for the current session.
+- [x] Choose the saved repeat mode (off, playlist, or file) in Playback settings.
 
 ## 2. Saved playlists and sessions
 

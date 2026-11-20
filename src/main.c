@@ -99,6 +99,7 @@ static const KeyBindingDefault app_key_defaults[] = {
     {"Ctrl+q", "quit", "Закрыть проигрыватель"},
     {"Ctrl+p", "script-message mpv-gtk queue", "Показать / скрыть очередь"},
     {"Ctrl+t", "script-message mpv-gtk trim", "Режим обрезки"},
+    {"L", "script-message mpv-gtk repeat", "Режим повтора"},
     {"Ctrl+,", "script-message mpv-gtk settings", "Настройки"},
     {"TAB", "script-message mpv-gtk focus-next", "Следующий элемент интерфейса"},
     {"Shift+TAB", "script-message mpv-gtk focus-previous", "Предыдущий элемент интерфейса"},
@@ -253,7 +254,6 @@ typedef struct {
     gboolean scrub_pending;
     gboolean keys_reload_pending, keys_loaded;
     gboolean preferences_observed, decoder_observed, playlist_observed, info_dirty;
-    gboolean loop_playlist;
     gboolean audio_observed;
     gboolean playlist_preferences_observed, playlist_extensions_observed;
     gboolean media_loading;
@@ -310,6 +310,8 @@ static gboolean change_key_binding(const char *old_key, const char *key,
                                    const char *command_text, gboolean reset,
                                    GError **error, gpointer data);
 static void app_key_action(Player *p, const char *action);
+static void set_repeat_mode(Player *p, int mode);
+static int loop_mode(const Player *p);
 static gboolean install_key_edits(Player *p, GError **error);
 static void continue_render_load(Player *p);
 static void prepare_close(Player *p);
@@ -1509,6 +1511,7 @@ static void property_changed(Player *p, mpv_event_property *property)
     gboolean preference_property = g_str_has_prefix(name, "hwdec") ||
         g_str_equal(name, "keepaspect") || g_str_equal(name, "deinterlace") ||
         g_str_equal(name, "deband") || g_str_equal(name, "loop-file") ||
+        g_str_equal(name, "loop-playlist") ||
         g_str_equal(name, "audio-delay") || g_str_equal(name, "sub-delay") ||
         g_str_equal(name, "sub-scale") || g_str_equal(name, "vid") ||
         g_str_equal(name, "ao") || g_str_equal(name, "audio-device") ||
@@ -1639,7 +1642,7 @@ static void property_changed(Player *p, mpv_event_property *property)
             queue_model_set_position(p->queue_model, p->playlist_position);
     } else if (g_str_equal(name, "loop-playlist")) {
         const char *loop = *(char **)value;
-        p->loop_playlist = loop && !g_str_equal(loop, "no") && !g_str_equal(loop, "0");
+        p->preference_values.loop_playlist = loop && !g_str_equal(loop, "no") && !g_str_equal(loop, "0");
         show_loop_state(p);
         if (p->queue_model)
             queue_model_update_repeat(p->queue_model, loop);
@@ -3020,6 +3023,23 @@ static void preference_changed(const char *name, mpv_format format, const void *
         if (p->preferences) preferences_window_update(p->preferences, &p->preference_values);
         return;
     }
+    if (g_str_equal(name, "ui-repeat")) {
+        /* Settings keep the choice in mpv.conf for the next start; the
+         * repeat button and its key change only the running session. */
+        if (format != MPV_FORMAT_INT64 || !value) return;
+        int mode = (int)*(const int64_t *)value;
+        if (mode < 0 || mode > 2) return;
+        const char *names[] = {"loop-file", "loop-playlist"};
+        const char *values[] = {mode == 2 ? "inf" : "no", mode == 1 ? "inf" : "no"};
+        g_autoptr(GError) error = NULL;
+        if (!config_set_options(&p->config, names, values, G_N_ELEMENTS(names), &error))
+            show_error(p, error->message);
+        else
+            p->preference_values.saved_repeat = mode;
+        set_repeat_mode(p, mode);
+        if (p->preferences) preferences_window_update(p->preferences, &p->preference_values);
+        return;
+    }
     if (g_str_equal(name, "ui-trim-precise-cut")) {
         if (format != MPV_FORMAT_INT64 || !value) return;
         g_autoptr(GError) error = NULL;
@@ -3693,6 +3713,7 @@ static void app_key_action(Player *p, const char *action)
     else if (g_str_equal(action, "settings")) show_preferences(p);
     else if (g_str_equal(action, "info")) toggle_playback_info(p);
     else if (g_str_equal(action, "trim")) trim_mode_toggle(p->trim);
+    else if (g_str_equal(action, "repeat")) set_repeat_mode(p, (loop_mode(p) + 1) % 3);
     else if (g_str_equal(action, "fullscreen"))
         set_fullscreen(p, !p->fullscreen);
     else if (g_str_equal(action, "quit")) gtk_window_close(p->window);
@@ -4012,7 +4033,7 @@ static void draw_loop_icon(GtkDrawingArea *area, cairo_t *cr, int width, int hei
  * A file loop takes precedence, as it does in mpv. */
 static int loop_mode(const Player *p)
 {
-    return p->preference_values.loop ? 2 : p->loop_playlist ? 1 : 0;
+    return p->preference_values.loop ? 2 : p->preference_values.loop_playlist ? 1 : 0;
 }
 
 /* A plain button with its own state classes: desktop themes style checked
@@ -4022,7 +4043,7 @@ static void show_loop_state(Player *p)
     if (!p->loop_button)
         return;
     static const char *const tooltips[] = {
-        "Без повтора", "Повтор плейлиста", "Повтор файла"
+        "Без повтора · L", "Повтор плейлиста · L", "Повтор файла · L"
     };
     int mode = loop_mode(p);
     if (mode) gtk_widget_add_css_class(p->loop_button, "loop-active");
@@ -4034,18 +4055,22 @@ static void show_loop_state(Player *p)
 }
 
 /* Mirrors loop-file and loop-playlist; mpv's own bindings, the queue's
- * repeat toggle and the settings switch stay in sync through them. */
+ * repeat toggle and the settings stay in sync through them. */
+static void set_repeat_mode(Player *p, int mode)
+{
+    if (!p->mpv || p->closing || p->quit_requested || mode < 0 || mode > 2)
+        return;
+    const char *file[] = {"set", "loop-file", mode == 2 ? "inf" : "no", NULL};
+    const char *playlist[] = {"set", "loop-playlist", mode == 1 ? "inf" : "no", NULL};
+    mpv_command_async(p->mpv, 0, file);
+    mpv_command_async(p->mpv, 0, playlist);
+}
+
 static void loop_clicked(GtkButton *button, gpointer data)
 {
     (void)button;
     Player *p = data;
-    if (!p->mpv || p->closing || p->quit_requested)
-        return;
-    int next = (loop_mode(p) + 1) % 3;
-    const char *file[] = {"set", "loop-file", next == 2 ? "inf" : "no", NULL};
-    const char *playlist[] = {"set", "loop-playlist", next == 1 ? "inf" : "no", NULL};
-    mpv_command_async(p->mpv, 0, file);
-    mpv_command_async(p->mpv, 0, playlist);
+    set_repeat_mode(p, (loop_mode(p) + 1) % 3);
 }
 
 static GtkWidget *icon_button(const char *icon, const char *tooltip, const char *action)
@@ -4156,6 +4181,14 @@ static gboolean init_mpv_core(Player *p)
         g_printerr("mpv-gtk: %s\n", mpv_error_string(result));
         return FALSE;
     }
+    /* The configured repeat mode, before any runtime change. */
+    char *loop_file = mpv_get_property_string(p->mpv, "loop-file");
+    char *loop_playlist = mpv_get_property_string(p->mpv, "loop-playlist");
+    gboolean file = loop_file && !g_str_equal(loop_file, "no") && !g_str_equal(loop_file, "0");
+    gboolean playlist = loop_playlist && !g_str_equal(loop_playlist, "no") && !g_str_equal(loop_playlist, "0");
+    p->preference_values.saved_repeat = file ? 2 : playlist ? 1 : 0;
+    mpv_free(loop_file);
+    mpv_free(loop_playlist);
     /* The standard libmpv Render API renders into our GTK widget.
      * Finalize this after mpv has evaluated includes and profiles:
      * a native gpu/gpu-next VO would otherwise create a second window. */
@@ -4281,6 +4314,7 @@ static void initialize_mpv_finished(GObject *source, GAsyncResult *result,
         p->active_vo = engine->active_vo;
         p->gl_api = engine->gl_api;
         p->preference_values.gpu_api = engine->preference_values.gpu_api;
+        p->preference_values.saved_repeat = engine->preference_values.saved_repeat;
         p->ready = engine->ready;
         engine->mpv = NULL;
         engine->gl_library = NULL;

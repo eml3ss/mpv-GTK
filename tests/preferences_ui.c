@@ -556,7 +556,7 @@ int main(void)
     g_assert_null(p->audio_delay);
     g_assert_null(p->sub_delay);
     g_assert_null(p->sub_scale);
-    g_assert_null(p->loop);
+    g_assert_null(p->repeat);
     g_assert_null(p->language);
     g_assert_null(p->cursor_hide_delay);
     g_assert_null(p->keys_page);

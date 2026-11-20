@@ -32,7 +32,11 @@ typedef struct {
     gboolean keepaspect;
     gboolean deinterlace;
     gboolean deband;
-    gboolean loop;
+    gboolean loop;          /* loop-file */
+    gboolean loop_playlist; /* loop-playlist */
+    /* Repeat mode saved in mpv.conf: 0 off, 1 playlist, 2 file. The live
+     * mode may differ after the repeat button or its key changed it. */
+    int saved_repeat;
     gboolean allow_replace;
     gboolean add_to_queue;
     gboolean timeline_previews;
