@@ -211,7 +211,7 @@ typedef struct {
     gboolean initial_queue_sort_pending;
     guint scrub_release_source;
     guint mpris_source;
-    GtkWidget *previous_button, *next_button, *chapter_button;
+    GtkWidget *previous_button, *next_button, *chapter_button, *loop_button;
     GtkWidget *seek, *seek_overlay, *volume, *playlist, *sidebar, *stage, *video_overlay;
     GtkWidget *info_overlay;
     GtkWidget *track_notice;
@@ -253,6 +253,7 @@ typedef struct {
     gboolean scrub_pending;
     gboolean keys_reload_pending, keys_loaded;
     gboolean preferences_observed, decoder_observed, playlist_observed, info_dirty;
+    gboolean loop_playlist;
     gboolean audio_observed;
     gboolean playlist_preferences_observed, playlist_extensions_observed;
     gboolean media_loading;
@@ -296,6 +297,7 @@ static void update_track_menu(Player *p, mpv_node *node);
 static void set_fullscreen(Player *p, gboolean fullscreen);
 static void update_controls_visibility(Player *p, gint64 now);
 static void show_preferences(Player *p);
+static void show_loop_state(Player *p);
 static void show_about(Player *p);
 static void update_app_menu(Player *p);
 static void open_config(const char *filename, gpointer data);
@@ -1636,8 +1638,11 @@ static void property_changed(Player *p, mpv_event_property *property)
         if (p->queue_model)
             queue_model_set_position(p->queue_model, p->playlist_position);
     } else if (g_str_equal(name, "loop-playlist")) {
+        const char *loop = *(char **)value;
+        p->loop_playlist = loop && !g_str_equal(loop, "no") && !g_str_equal(loop, "0");
+        show_loop_state(p);
         if (p->queue_model)
-            queue_model_update_repeat(p->queue_model, *(char **)value);
+            queue_model_update_repeat(p->queue_model, loop);
     } else if (g_str_equal(name, "playlist-count")) {
         p->playlist_count = *(int64_t *)value;
         update_playlist_navigation(p);
@@ -1674,6 +1679,7 @@ static void property_changed(Player *p, mpv_event_property *property)
     } else if (g_str_equal(name, "loop-file")) {
         const char *loop = *(char **)value;
         p->preference_values.loop = !g_str_equal(loop, "no") && !g_str_equal(loop, "0");
+        show_loop_state(p);
     } else if (g_str_equal(name, "audio-delay")) {
         p->preference_values.audio_delay = *(double *)value;
     } else if (g_str_equal(name, "sub-delay")) {
@@ -3974,6 +3980,74 @@ static gboolean close_window(GtkWindow *window, gpointer data)
     return FALSE;
 }
 
+/* Repeat-one glyph drawn in the stroke style of the Trim Mode glyphs, in
+ * the button's CSS color so the checked state follows the theme accent. */
+static void draw_loop_icon(GtkDrawingArea *area, cairo_t *cr, int width, int height, gpointer data)
+{
+    (void)data;
+    GdkRGBA color;
+    gtk_widget_get_color(GTK_WIDGET(area), &color);
+    gdk_cairo_set_source_rgba(cr, &color);
+    cairo_translate(cr, (width - 24) / 2.0, (height - 24) / 2.0);
+    cairo_set_line_width(cr, 1.7);
+    cairo_set_line_cap(cr, CAIRO_LINE_CAP_ROUND);
+    cairo_set_line_join(cr, CAIRO_LINE_JOIN_ROUND);
+    cairo_move_to(cr, 4, 11.5);
+    cairo_arc(cr, 7, 9.5, 3, G_PI, 1.5 * G_PI);
+    cairo_line_to(cr, 19, 6.5);
+    cairo_move_to(cr, 16, 3.5); cairo_line_to(cr, 19, 6.5); cairo_line_to(cr, 16, 9.5);
+    cairo_move_to(cr, 20, 12.5);
+    cairo_arc(cr, 17, 14.5, 3, 0, 0.5 * G_PI);
+    cairo_line_to(cr, 5, 17.5);
+    cairo_move_to(cr, 8, 20.5); cairo_line_to(cr, 5, 17.5); cairo_line_to(cr, 8, 14.5);
+    /* The "1" marks the active repeat; the plain arrows mean it is off. */
+    GtkWidget *button = gtk_widget_get_parent(GTK_WIDGET(area));
+    if (button && gtk_widget_has_css_class(button, "loop-file")) {
+        cairo_move_to(cr, 11, 10.5); cairo_line_to(cr, 12.5, 9.5); cairo_line_to(cr, 12.5, 14.5);
+    }
+    cairo_stroke(cr);
+}
+
+/* Repeat modes in cycling order: off, the whole queue, the current file.
+ * A file loop takes precedence, as it does in mpv. */
+static int loop_mode(const Player *p)
+{
+    return p->preference_values.loop ? 2 : p->loop_playlist ? 1 : 0;
+}
+
+/* A plain button with its own state classes: desktop themes style checked
+ * toggle buttons at user priority, which would override the accent look. */
+static void show_loop_state(Player *p)
+{
+    if (!p->loop_button)
+        return;
+    static const char *const tooltips[] = {
+        "Без повтора", "Повтор плейлиста", "Повтор файла"
+    };
+    int mode = loop_mode(p);
+    if (mode) gtk_widget_add_css_class(p->loop_button, "loop-active");
+    else gtk_widget_remove_css_class(p->loop_button, "loop-active");
+    if (mode == 2) gtk_widget_add_css_class(p->loop_button, "loop-file");
+    else gtk_widget_remove_css_class(p->loop_button, "loop-file");
+    translated_tooltip(p->loop_button, tooltips[mode]);
+    gtk_widget_queue_draw(gtk_button_get_child(GTK_BUTTON(p->loop_button)));
+}
+
+/* Mirrors loop-file and loop-playlist; mpv's own bindings, the queue's
+ * repeat toggle and the settings switch stay in sync through them. */
+static void loop_clicked(GtkButton *button, gpointer data)
+{
+    (void)button;
+    Player *p = data;
+    if (!p->mpv || p->closing || p->quit_requested)
+        return;
+    int next = (loop_mode(p) + 1) % 3;
+    const char *file[] = {"set", "loop-file", next == 2 ? "inf" : "no", NULL};
+    const char *playlist[] = {"set", "loop-playlist", next == 1 ? "inf" : "no", NULL};
+    mpv_command_async(p->mpv, 0, file);
+    mpv_command_async(p->mpv, 0, playlist);
+}
+
 static GtkWidget *icon_button(const char *icon, const char *tooltip, const char *action)
 {
     GtkWidget *button = icon ? gtk_button_new_from_icon_name(icon) : gtk_button_new();
@@ -4142,7 +4216,8 @@ static gboolean init_mpv_core(Player *p)
         {"playlist-count", MPV_FORMAT_INT64}, {"track-list", MPV_FORMAT_NODE},
         {"aid", MPV_FORMAT_STRING}, {"sid", MPV_FORMAT_STRING},
         {"fullscreen", MPV_FORMAT_FLAG},
-        {"chapter", MPV_FORMAT_INT64}, {"chapters", MPV_FORMAT_INT64}
+        {"chapter", MPV_FORMAT_INT64}, {"chapters", MPV_FORMAT_INT64},
+        {"loop-file", MPV_FORMAT_STRING}, {"loop-playlist", MPV_FORMAT_STRING}
     };
     for (guint i = 0; i < G_N_ELEMENTS(properties); ++i)
         mpv_observe_property(p->mpv, i + 1, properties[i].name, properties[i].format);
@@ -4802,6 +4877,20 @@ static void activate(GtkApplication *application, gpointer data)
     GtkWidget *queue_button = icon_button("view-list-symbolic",
         "Очередь · Ctrl+P", "app.queue");
     gtk_box_append(GTK_BOX(transport), queue_button);
+    p->loop_button = gtk_button_new();
+    GtkWidget *loop_icon = gtk_drawing_area_new();
+    gtk_drawing_area_set_content_width(GTK_DRAWING_AREA(loop_icon), 24);
+    gtk_drawing_area_set_content_height(GTK_DRAWING_AREA(loop_icon), 24);
+    gtk_drawing_area_set_draw_func(GTK_DRAWING_AREA(loop_icon), draw_loop_icon, NULL, NULL);
+    gtk_widget_set_can_target(loop_icon, FALSE);
+    gtk_button_set_child(GTK_BUTTON(p->loop_button), loop_icon);
+    gtk_widget_add_css_class(p->loop_button, "flat");
+    gtk_widget_add_css_class(p->loop_button, "control-button");
+    gtk_widget_add_css_class(p->loop_button, "loop-button");
+    gtk_widget_set_focus_on_click(p->loop_button, FALSE);
+    show_loop_state(p);
+    g_signal_connect(p->loop_button, "clicked", G_CALLBACK(loop_clicked), p);
+    gtk_box_append(GTK_BOX(transport), p->loop_button);
     p->chapter_button = chapters_button_new(select_chapter, step_chapter, p);
     gtk_widget_set_valign(p->chapter_button, GTK_ALIGN_FILL);
     gtk_widget_add_css_class(p->chapter_button, "chapter-menu");
@@ -4893,6 +4982,7 @@ static void activate(GtkApplication *application, gpointer data)
         "font-weight: 600; font-variant-numeric: tabular-nums; }"
         ".compact-menu > button:hover { background: alpha(@window_fg_color,.08); }"
         ".active-track > button { color: @accent_color; background: alpha(@accent_bg_color,.12); }"
+        ".controls .loop-button.loop-active { color: @accent_color; }"
         ".timecode { font-variant-numeric: tabular-nums; font-family: 'Adwaita Sans', sans-serif; }"
         ".clickable-time:hover { color: @accent_color; }"
         ".controls button.trim-active { color: @accent_color; background: alpha(@accent_bg_color,.14); }"

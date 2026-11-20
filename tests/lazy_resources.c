@@ -37,8 +37,12 @@ static void collect_events(Player *p, Events *events)
 static void assert_group(const Events *events, const ObservedProperty *properties,
                          gsize count, gboolean present)
 {
-    for (gsize i = 0; i < count; ++i)
+    for (gsize i = 0; i < count; ++i) {
+        /* The always-visible repeat button keeps loop-file observed. */
+        if (!present && g_str_equal(properties[i].name, "loop-file"))
+            continue;
         g_assert_cmpint(g_hash_table_contains(events->properties, properties[i].name), ==, present);
+    }
 }
 
 static void check_queue_widgets(Player *p)
