@@ -835,6 +835,11 @@ static void begin_process(TrimExport *e, ProcessStage stage)
             "-avoid_negative_ts", "make_zero", j->temp, NULL};
         g_autoptr(GPtrArray) args = g_ptr_array_new_with_free_func(g_free);
         for (guint i = 0; prefix[i]; ++i) g_ptr_array_add(args, g_strdup(prefix[i]));
+        /* Data streams (timecode, telemetry) cannot be stream-copied into
+         * MP4/MOV or Matroska; MP4/MOV rebuild the timecode track from the
+         * copied timecode tag. A negative map without matches is harmless. */
+        g_ptr_array_add(args, g_strdup("-map"));
+        g_ptr_array_add(args, g_strdup("-0:d"));
         for (guint i = 0; i < j->excluded_audio->len; ++i) {
             g_ptr_array_add(args, g_strdup("-map"));
             g_ptr_array_add(args, g_strdup_printf("-0:%" G_GINT64_FORMAT,

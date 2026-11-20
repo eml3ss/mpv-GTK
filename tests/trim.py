@@ -27,6 +27,12 @@ subprocess.run(['ffmpeg','-nostdin','-v','error',
     '-metadata:s:s:0','language=eng','-shortest',str(source)],check=True)
 second=tmp/'Second clip.mkv'
 shutil.copy(source,second)
+timecoded=tmp/'timecode.mp4'
+subprocess.run(['ffmpeg','-nostdin','-v','error',
+    '-f','lavfi','-i','testsrc2=size=160x90:rate=25:duration=4',
+    '-f','lavfi','-i','sine=frequency=440:sample_rate=48000:duration=4',
+    '-c:v','libx264','-preset','ultrafast','-g','25','-threads','1','-c:a','aac',
+    '-timecode','01:00:00:00','-shortest',str(timecoded)],check=True)
 external=tmp/'external.flac'
 subprocess.run(['ffmpeg','-nostdin','-v','error','-f','lavfi','-i',
     'sine=frequency=220:sample_rate=48000:duration=4','-c:a','flac',str(external)],check=True)
@@ -282,6 +288,19 @@ try:
     assert [x['filename'] for x in prop('playlist')]==[str(renamed)],prop('playlist')
     assert not list(tmp.glob('.mpv-trim-*')),list(tmp.glob('.mpv-trim-*'))
     print('PASS audio-only replacement saves the source codec container and swaps the queue entry',flush=True)
+    previous=audio_state()['file_serial']
+    call('loadfile',str(timecoded))
+    wait(lambda:prop('user-data/trim-audio'),lambda x:x and x['file_serial']!=previous and x['total_count']==1)
+    wait(lambda:prop('user-data/trim-controls'),lambda x:x and x.get('available'))
+    action('export','keep')
+    wait(lambda:prop('user-data/trim-export'),lambda x:x and x.get('busy'))
+    result=wait(lambda:prop('user-data/trim-export'),lambda x:x and not x.get('busy') and 'success' in x,seconds=12)
+    assert result['success'],result
+    streams=json.loads(subprocess.check_output(['ffprobe','-v','error','-show_streams',
+        '-of','json',result['path']],text=True))['streams']
+    assert [x['codec_type'] for x in streams if x['codec_type']!='data']==['video','audio'],streams
+    assert streams[0].get('tags',{}).get('timecode')=='01:00:00:00',streams
+    print('PASS MP4 timecode tracks are rebuilt instead of copied',flush=True)
     previous=audio_state()['file_serial']
     call('loadfile',str(source))
     wait(lambda:prop('user-data/trim-audio'),lambda x:x and x['file_serial']!=previous and x.get('video_included'))

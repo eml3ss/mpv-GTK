@@ -57,7 +57,9 @@ holds the controls while the interaction is active.
 FFmpeg and ffprobe are required. Exports support local video files and use
 FFmpeg stream copy, subject to the original codec/keyframe cutting behavior.
 They keep the original extension, metadata, chapter mapping, and source streams
-except video or audio tracks explicitly excluded from export.
+except video or audio tracks explicitly excluded from export. Data streams
+such as timecode or telemetry tracks are not copied; MP4 and MOV exports
+rebuild the timecode track from the copied timecode tag.
 MP4 audio track names remain readable by mpv after export, including when
 only a subset of the original tracks is kept. The completed temporary file's
 audio title atoms are normalized before verification; source files are not
